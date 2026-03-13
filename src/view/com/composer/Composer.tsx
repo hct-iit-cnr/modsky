@@ -172,6 +172,8 @@ import {
 import {type TextInputRef} from './text-input/TextInput.types'
 import {getVideoMetadata} from './videos/pickVideo'
 import {clearThumbnailCache} from './videos/VideoTranscodeBackdrop'
+import { getInterventionConfig } from '#/lib/interventionEngine'; // adjust path as needed
+
 
 type CancelRef = {
   onPressCancel: () => void
@@ -793,6 +795,8 @@ export const ComposePost = ({
           post.embed.media.video.status === 'error'
         ),
     )
+  
+
 
   const onPressPublish = React.useCallback(async () => {
     if (isPublishing) {
@@ -1008,11 +1012,46 @@ export const ComposePost = ({
     cleanupPublishedDraft,
     loadedDraftCreatedAt,
   ])
+  
+  // --- MODSKY INTERVENTION LOGIC START ---
+  const [interventionState, setInterventionState] = useState<{
+    isVisible: boolean;
+    type: 'blanket' | 'adapted';
+    text: string;
+    color: string;
+    position: number;
+  } | null>(null);
+
+  const handlePublishIntent = React.useCallback(() => {
+    // If the composer is empty or invalid, let the normal function handle it
+    if (!canPost || isPublishing) {
+      onPressPublish();
+      return;
+    }
+
+    // Call your new external file for the logic
+    const config = getInterventionConfig();
+
+    if (!config.isVisible) {
+      // 33% chance: No intervention, publish normally
+      onPressPublish();
+    } else {
+      // 66% chance: Show either blanket or adapted intervention
+      setInterventionState({
+        isVisible: true,
+        type: config.type as 'blanket' | 'adapted',
+        text: config.text!,
+        color: config.color!,
+        position: config.position!,
+      });
+    }
+  }, [canPost, isPublishing, onPressPublish]);
+  // --- MODSKY INTERVENTION LOGIC END ---
 
   // Preserves the referential identity passed to each post item.
   // Avoids re-rendering all posts on each keystroke.
   const onComposerPostPublish = useNonReactiveCallback(() => {
-    onPressPublish()
+    handlePublishIntent()
   })
 
   React.useEffect(() => {
@@ -1148,7 +1187,7 @@ export const ComposePost = ({
             publishingStage={publishingStage}
             topBarAnimatedStyle={topBarAnimatedStyle}
             onCancel={onPressCancel}
-            onPublish={onPressPublish}
+            onPublish={handlePublishIntent}
             onSelectDraft={handleSelectDraft}
             onSaveDraft={saveCurrentDraft}
             onDiscard={handleClearComposer}
@@ -1268,6 +1307,64 @@ export const ComposePost = ({
             </Prompt.Actions>
           </Prompt.Outer>
         )}
+        {/* --- MODSKY INTERVENTION UI START --- */}
+        {interventionState?.isVisible && (
+          <View style={[
+            StyleSheet.absoluteFillObject, 
+            { zIndex: 9999, elevation: 9999, pointerEvents: 'box-none' },
+            interventionState.type === 'blanket' && { backgroundColor: 'rgba(0,0,0,0.4)' }
+          ]}>
+            <View style={{
+              position: 'absolute',
+              // 3x3 Grid Calculation
+              top: `${Math.floor(interventionState.position / 3) * 30 + 10}%`,
+              left: `${(interventionState.position % 3) * 30 + 5}%`,
+              width: '45%', // Made slightly wider to comfortably fit two buttons side-by-side
+              backgroundColor: interventionState.color,
+              padding: 15,
+              borderRadius: 12,
+              shadowColor: '#000',
+              shadowOffset: { width: 0, height: 4 },
+              shadowOpacity: 0.3,
+              shadowRadius: 5,
+              elevation: 6,
+            }}>
+              <Text style={{ fontSize: 16, marginBottom: 15, color: '#000' }}>
+                {interventionState.text}
+              </Text>
+              
+              {/* Button Row */}
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between', gap: 8 }}>
+                <Button
+                  label="Edit"
+                  size="small"
+                  color="secondary"
+                  style={{ flex: 1, alignItems: 'center' }}
+                  onPress={() => {
+                    // Just close the popup. Does NOT publish.
+                    setInterventionState(null); 
+                  }}>
+                  <ButtonText>Edit</ButtonText>
+                </Button>
+
+                <Button
+                  label="Publish"
+                  size="small"
+                  color="primary"
+                  style={{ flex: 1, alignItems: 'center' }}
+                  onPress={() => {
+                    // Close popup AND publish the post.
+                    setInterventionState(null); 
+                    onPressPublish(); 
+                  }}>
+                  <ButtonText>Publish</ButtonText>
+                </Button>
+              </View>
+
+            </View>
+          </View>
+        )}
+        {/* --- MODSKY INTERVENTION UI END --- */}
       </KeyboardAvoidingView>
     </BottomSheetPortalProvider>
   )
