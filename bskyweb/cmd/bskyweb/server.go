@@ -204,7 +204,7 @@ func serve(cctx *cli.Context) error {
 	// CORS middleware
 	e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
 		AllowOrigins: corsOrigins,
-		AllowMethods: []string{http.MethodGet, http.MethodHead, http.MethodOptions},
+		AllowMethods: []string{http.MethodGet, http.MethodHead, http.MethodPost, http.MethodOptions},
 	}))
 
 	//
@@ -267,6 +267,9 @@ func serve(cctx *cli.Context) error {
 
 	// download
 	e.GET("/download", server.Download)
+
+	// local analytics
+	e.POST("/t", analyticsHandler)
 
 	// generic routes
 	e.GET("/hashtag/:tag", server.WebGeneric)
