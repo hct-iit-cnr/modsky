@@ -72,6 +72,7 @@ import {
 import {useIsKeyboardVisible} from '#/lib/hooks/useIsKeyboardVisible'
 import {useNonReactiveCallback} from '#/lib/hooks/useNonReactiveCallback'
 import {useWebMediaQueries} from '#/lib/hooks/useWebMediaQueries'
+import { getInterventionConfig, type InterventionConfig } from '#/lib/interventionEngine';
 import {mimeToExt} from '#/lib/media/video/util'
 import {useCallOnce} from '#/lib/once'
 import {type NavigationProp} from '#/lib/routes/types'
@@ -172,7 +173,6 @@ import {
 import {type TextInputRef} from './text-input/TextInput.types'
 import {getVideoMetadata} from './videos/pickVideo'
 import {clearThumbnailCache} from './videos/VideoTranscodeBackdrop'
-import { getInterventionConfig } from '#/lib/interventionEngine'; // adjust path as needed
 
 
 type CancelRef = {
@@ -216,11 +216,32 @@ export const ComposePost = ({
   const {data: preferences} = usePreferencesQuery()
   const navigation = useNavigation<NavigationProp>()
 
+  // --- TELEMETRY TRACKER START ---
+  const telemetryLog = useRef<{
+    event: string;
+    timestamp: number;
+    payload?: any;
+  }[]>([]);
+
+  // Helper function to log events to our dictionary and the console
+  const logTelemetry = useNonReactiveCallback((event: string, payload: any = {}) => {
+    const entry = { event, timestamp: Date.now(), payload };
+    telemetryLog.current.push(entry);
+    console.log(`[Telemetry] ${event}`, JSON.stringify(entry, null, 2));
+    
+    // NOTE: You can eventually hook this up to your backend API
+    // e.g., sendToBackend(entry);
+  });
+  // --- TELEMETRY TRACKER END ---
+
+  
+
+  
   const [isKeyboardVisible] = useIsKeyboardVisible({iosUseWillEvents: true})
   const [isPublishing, setIsPublishing] = useState(false)
   const [publishingStage, setPublishingStage] = useState('')
   const [error, setError] = useState('')
-
+  const [hasLoggedFirstKeystroke, setHasLoggedFirstKeystroke] = useState(false);
   /**
    * Track when a draft was created so we can measure draft age in metrics.
    * Set when a draft is loaded via handleSelectDraft.
@@ -301,6 +322,7 @@ export const ComposePost = ({
     [activePost.id],
   )
 
+  
   const selectVideo = React.useCallback(
     (postId: string, asset: ImagePickerAsset) => {
       const abortController = new AbortController()
@@ -346,6 +368,7 @@ export const ComposePost = ({
 
   // Fire composer:open metric on mount
   useCallOnce(() => {
+    logTelemetry('COMPOSER_OPENED', { isReply: !!replyTo, hasQuote: !!initQuote });
     ax.metric('composer:open', {
       logContext: logContext ?? 'Other',
       isReply: !!replyTo,
@@ -524,6 +547,20 @@ export const ComposePost = ({
 
       // Track when the draft was created for metrics
       setLoadedDraftCreatedAt(draftSummary.createdAt)
+      
+      // --- NEW TELEMETRY ---
+      logTelemetry('DRAFT_LOADED', { 
+        draftId: draftSummary.id,
+        postCount: draftSummary.posts.length,
+        hasMedia: loadedMedia.size > 0,
+        
+        // ADD THIS: Grabs the text of the first post in the draft
+        text: draftSummary.posts[0]?.text || '',
+        
+        // (Optional) If you want the text of EVERY post in a drafted thread, 
+        // you can map the whole array instead:
+        // allTexts: draftSummary.posts.map(p => p.text)
+      });
 
       // Fire draft:load metric
       const draftPosts = draftSummary.posts
@@ -550,6 +587,7 @@ export const ComposePost = ({
   const [publishOnUpload, setPublishOnUpload] = useState(false)
 
   const onClose = useCallback(() => {
+    logTelemetry('COMPOSER_CLOSED');
     closeComposer()
     clearThumbnailCache(queryClient)
     revokeAllMediaUrls()
@@ -591,10 +629,18 @@ export const ComposePost = ({
         composerState,
         existingDraftId: composerState.draftId,
       })
+
+      // --- NEW TELEMETRY ---
+      const posts = composerState.thread.posts;
+      logTelemetry('DRAFT_SAVED', {
+        isNewDraft: !composerState.draftId,
+        draftId: result.draftId,
+        textLength: posts[0].richtext.text.length
+      });
+
       composerDispatch({type: 'mark_saved', draftId: result.draftId})
 
       // Fire draft:save metric
-      const posts = composerState.thread.posts
       ax.metric('draft:save', {
         isNewDraft,
         hasText: posts.some(p => p.richtext.text.trim().length > 0),
@@ -651,6 +697,10 @@ export const ComposePost = ({
 
   // Handle discard action - fires metric and closes composer
   const handleDiscard = React.useCallback(() => {
+    logTelemetry('POST_DISCARDED', { 
+      textLength: activePost.richtext.text.length,
+      text: activePost.richtext.text
+    });
     const posts = thread.posts
     const hasContent = posts.some(
       post =>
@@ -943,6 +993,10 @@ export const ComposePost = ({
         originalLocalRefs: composerState.originalLocalRefs,
       })
     }
+    logTelemetry('POST_PUBLISHED_SUCCESSFULLY', { 
+      finalLength: activePost.richtext.text.length,
+      text: activePost.richtext.text
+    });
     setLangPrefs.savePostLanguageToHistory()
     if (initQuote) {
       // We want to wait for the quote count to update before we call `onPost`, which will refetch data
@@ -1014,38 +1068,84 @@ export const ComposePost = ({
   ])
   
   // --- MODSKY INTERVENTION LOGIC START ---
-  const [interventionState, setInterventionState] = useState<{
-    isVisible: boolean;
-    type: 'blanket' | 'adapted';
-    text: string;
-    color: string;
-    position: number;
-  } | null>(null);
 
-  const handlePublishIntent = React.useCallback(() => {
-    // If the composer is empty or invalid, let the normal function handle it
+  const [interventionState, setInterventionState] = useState<InterventionConfig | null>(null);
+  const [isFakeLoading, setIsFakeLoading] = useState(false);
+  const [hasSeenIntervention, setHasSeenIntervention] = useState(false);
+
+  // --- DEBOUNCED TEXT CAPTURE START ---
+  const currentText = activePost?.richtext.text || '';
+  
+  useEffect(() => {
+    if (!currentText) return;
+
+    // --- NEW TELEMETRY ---
+    if (!hasLoggedFirstKeystroke) {
+      logTelemetry('FIRST_KEYSTROKE_LOGGED', { textLength: currentText.length });
+      setHasLoggedFirstKeystroke(true);
+    }
+
+    const timeoutId = setTimeout(() => {
+      // This runs if the user hasn't typed anything new for 1 second
+      logTelemetry('TEXT_INTERMEDIATE_SNAPSHOT', { 
+        text: currentText, 
+        length: currentText.length,
+        isAfterIntervention: !!interventionState // Helpful to know if they are revising
+      });
+    }, 1000); // 1000ms = 1 second
+
+    return () => clearTimeout(timeoutId);
+  }, [currentText, logTelemetry, interventionState, hasLoggedFirstKeystroke]);
+  // --- DEBOUNCED TEXT CAPTURE END ---
+  
+
+  const handlePublishIntent = useNonReactiveCallback(() => {
+    const exactCurrentText = activePost?.richtext.text || '';
+
+    logTelemetry('PUBLISH_ATTEMPTED', { 
+      canPost, 
+      isPublishing,
+      text: exactCurrentText
+    });
+
     if (!canPost || isPublishing) {
       onPressPublish();
       return;
     }
 
-    // Call your new external file for the logic
+    if (hasSeenIntervention) {
+      logTelemetry('PUBLISH_AFTER_EDIT', { text: exactCurrentText });
+      onPressPublish();
+      return;
+    }
+
     const config = getInterventionConfig();
 
     if (!config.isVisible) {
-      // 33% chance: No intervention, publish normally
+      logTelemetry('PUBLISH_NO_INTERVENTION', { text: exactCurrentText });
       onPressPublish();
-    } else {
-      // 66% chance: Show either blanket or adapted intervention
-      setInterventionState({
-        isVisible: true,
-        type: config.type as 'blanket' | 'adapted',
-        text: config.text!,
-        color: config.color!,
-        position: config.position!,
-      });
+      return;
     }
-  }, [canPost, isPublishing, onPressPublish]);
+
+    // --- START MRT INTERVENTION FLOW ---
+    setHasSeenIntervention(true);
+    
+    // 1. Set the state IMMEDIATELY so the popup knows where to position itself
+    // and what type of loading animation to show.
+    setInterventionState(config); 
+    setIsFakeLoading(true); 
+    
+    logTelemetry('INTERVENTION_OPENED', { 
+      ...config, 
+      userText: exactCurrentText 
+    });
+
+    // 2. Wait for the random loading duration, then turn OFF the loading phase
+    // to reveal the text and buttons.
+    setTimeout(() => {
+      setIsFakeLoading(false);
+    }, config.loadingDuration);
+  });
   // --- MODSKY INTERVENTION LOGIC END ---
 
   // Preserves the referential identity passed to each post item.
@@ -1162,6 +1262,7 @@ export const ComposePost = ({
         currentLanguages={currentLanguages}
         onSelectLanguage={onSelectLanguage}
         openGallery={openGallery}
+        logTelemetry={logTelemetry} // <--- ADD THIS HERE
       />
     </>
   )
@@ -1236,6 +1337,7 @@ export const ComposePost = ({
                   onClearVideo={clearVideo}
                   onPublish={onComposerPostPublish}
                   onError={setError}
+                  logTelemetry={logTelemetry} // <--- ADD THIS HERE
                 />
                 {IS_WEBFooterSticky && post.id === activePost.id && (
                   <View style={styles.stickyFooterWeb}>{footer}</View>
@@ -1307,64 +1409,79 @@ export const ComposePost = ({
             </Prompt.Actions>
           </Prompt.Outer>
         )}
-        {/* --- MODSKY INTERVENTION UI START --- */}
-        {interventionState?.isVisible && (
+        {/* --- MODSKY MRT INTERVENTION UI --- */}
+        {interventionState && (
           <View style={[
-            StyleSheet.absoluteFillObject, 
-            { zIndex: 9999, elevation: 9999, pointerEvents: 'box-none' },
-            interventionState.type === 'blanket' && { backgroundColor: 'rgba(0,0,0,0.4)' }
+            StyleSheet.absoluteFillObject,
+            { zIndex: 9999, pointerEvents: 'auto', alignItems: 'center' },
+            interventionState?.type === 'blanket' && { backgroundColor: 'rgba(0,0,0,0.4)' }
           ]}>
-            <View style={{
-              position: 'absolute',
-              // 3x3 Grid Calculation
-              top: `${Math.floor(interventionState.position / 3) * 30 + 10}%`,
-              left: `${(interventionState.position % 3) * 30 + 5}%`,
-              width: '45%', // Made slightly wider to comfortably fit two buttons side-by-side
-              backgroundColor: interventionState.color,
-              padding: 15,
-              borderRadius: 12,
-              shadowColor: '#000',
-              shadowOffset: { width: 0, height: 4 },
-              shadowOpacity: 0.3,
-              shadowRadius: 5,
-              elevation: 6,
-            }}>
-              <Text style={{ fontSize: 16, marginBottom: 15, color: '#000' }}>
-                {interventionState.text}
-              </Text>
+            <View style={[
+              {
+                position: 'absolute',
+                width: '85%', // Centered horizontally
+                backgroundColor: '#FFF', // Static color now
+                padding: 20,
+                borderRadius: 15,
+                shadowColor: '#000',
+                shadowOpacity: 0.2,
+                shadowRadius: 10,
+                elevation: 10,
+              },
+              // Map semantic position to a vertical screen percentage
+              interventionState?.position === 'top' ? { top: '5%' } :
+              interventionState?.position === 'middle' ? { top: '35%' } :
+              interventionState?.position === 'placeholder' ? { top: '55%' } :
+              interventionState?.position === 'bottom' ? { bottom: '5%' } : 
+              { top: '35%' } // Fallback
+            ]}>
               
-              {/* Button Row */}
-              <View style={{ flexDirection: 'row', justifyContent: 'space-between', gap: 8 }}>
-                <Button
-                  label="Edit"
-                  size="small"
-                  color="secondary"
-                  style={{ flex: 1, alignItems: 'center' }}
-                  onPress={() => {
-                    // Just close the popup. Does NOT publish.
-                    setInterventionState(null); 
-                  }}>
-                  <ButtonText>Edit</ButtonText>
-                </Button>
+              {isFakeLoading ? (
+                <View style={[a.align_center, a.py_md]}>
+                  {interventionState?.loadingType === 'circle' && <ActivityIndicator size="large" />}
+                  {interventionState?.loadingType === 'lines' && <Text>- - - - -</Text>}
+                  {interventionState?.loadingType === 'placeholder' && <Text style={{opacity: 0.3}}>Writing...</Text>}
+                </View>
+              ) : (
+                <>
+                  <View style={[a.flex_row, a.align_center, a.gap_sm, a.mb_md]}>
+                    {interventionState?.hasIcon && <CircleInfoIcon size="md" />}
+                    <Text style={[a.flex_1, { fontSize: 16, color: '#000', fontWeight: '500' }]}>
+                      {interventionState?.text}
+                    </Text>
+                  </View>
 
-                <Button
-                  label="Publish"
-                  size="small"
-                  color="primary"
-                  style={{ flex: 1, alignItems: 'center' }}
-                  onPress={() => {
-                    // Close popup AND publish the post.
-                    setInterventionState(null); 
-                    onPressPublish(); 
-                  }}>
-                  <ButtonText>Publish</ButtonText>
-                </Button>
-              </View>
-
+                  <View style={[a.flex_row, a.gap_md]}>
+                    <Button
+                      label="Edit"
+                      size="small"
+                      variant="outline"
+                      style={[a.flex_1]}
+                      onPress={() => {
+                        logTelemetry('INTERVENTION_DECISION_EDIT', { text: activePost?.richtext.text || '' });
+                        setInterventionState(null);
+                      }}>
+                      <ButtonText>Edit</ButtonText>
+                    </Button>
+                    <Button
+                      label="Publish"
+                      size="small"
+                      color="primary"
+                      style={[a.flex_1]}
+                      onPress={() => {
+                        logTelemetry('INTERVENTION_DECISION_BYPASS');
+                        setInterventionState(null);
+                        onPressPublish();
+                      }}>
+                      <ButtonText>Publish</ButtonText>
+                    </Button>
+                  </View>
+                </>
+              )}
             </View>
           </View>
         )}
-        {/* --- MODSKY INTERVENTION UI END --- */}
+        {/* --- MODSKY MRT INTERVENTION UI END --- */}
       </KeyboardAvoidingView>
     </BottomSheetPortalProvider>
   )
@@ -1385,6 +1502,7 @@ let ComposerPost = React.memo(function ComposerPost({
   onSelectVideo,
   onError,
   onPublish,
+  logTelemetry, // <--- Add to destructured props
 }: {
   post: PostDraft
   dispatch: (action: ComposerAction) => void
@@ -1400,6 +1518,7 @@ let ComposerPost = React.memo(function ComposerPost({
   onSelectVideo: (postId: string, asset: ImagePickerAsset) => void
   onError: (error: string) => void
   onPublish: (richtext: RichText) => void
+  logTelemetry: (event: string, payload?: any) => void // <--- Add to type definitions
 }) {
   const {currentAccount} = useSession()
   const currentDid = currentAccount!.did
@@ -1428,12 +1547,30 @@ let ComposerPost = React.memo(function ComposerPost({
 
   const onImageAdd = useCallback(
     (next: ComposerImage[]) => {
+      
+      console.log("RAW IMAGE DATA:", next);
+
+      const imageMetadata = next.map(img => {
+        const source = img.source || {}; // Look inside the 'source' object!
+        return {
+          width: source.width,
+          height: source.height,
+          mimeType: source.mime || source.mimeType, // Catches it depending on how the AT Protocol formatted it
+        };
+      });
+
+      logTelemetry('MEDIA_ADDED', { 
+        type: 'image_selected', // (or 'image_pasted' in ComposerPost)
+        count: next.length,
+        metadata: imageMetadata
+      });
+      
       dispatchPost({
         type: 'embed_add_images',
         images: next,
       })
     },
-    [dispatchPost],
+    [dispatchPost, logTelemetry], 
   )
 
   const onNewLink = useCallback(
@@ -1921,6 +2058,7 @@ function ComposerFooter({
   currentLanguages,
   onSelectLanguage,
   openGallery,
+  logTelemetry, // <--- Add to destructured props
 }: {
   post: PostDraft
   dispatch: (action: PostAction) => void
@@ -1932,6 +2070,7 @@ function ComposerFooter({
   currentLanguages: string[]
   onSelectLanguage?: (language: string) => void
   openGallery?: boolean
+  logTelemetry: (event: string, payload?: any) => void // <--- Add to type definitions
 }) {
   const t = useTheme()
   const {_} = useLingui()
@@ -1965,19 +2104,42 @@ function ComposerFooter({
 
   const onImageAdd = useCallback(
     (next: ComposerImage[]) => {
+      console.log("RAW IMAGE DATA:", next);
+      // --- ADD TELEMETRY HERE TOO ---
+      const imageMetadata = next.map(img => {
+        const source = img.source || {}; // Look inside the 'source' object!
+        return {
+          width: source.width,
+          height: source.height,
+          mimeType: source.mime || source.mimeType, // Catches it depending on how the AT Protocol formatted it
+        };
+      });
+
+      logTelemetry('MEDIA_ADDED', { 
+        type: 'image_selected', // (or 'image_pasted' in ComposerPost)
+        count: next.length,
+        metadata: imageMetadata
+      });
+
       dispatch({
         type: 'embed_add_images',
         images: next,
       })
     },
-    [dispatch],
+    [dispatch, logTelemetry],
   )
 
   const onSelectGif = useCallback(
     (gif: Gif) => {
+      // --- UPDATED TELEMETRY ---
+      logTelemetry('MEDIA_ADDED', { 
+        type: 'gif',
+        url: gif.url, // This tells you exactly which GIF they chose!
+      }); 
+      
       dispatch({type: 'embed_add_gif', gif})
     },
-    [dispatch],
+    [dispatch, logTelemetry],
   )
 
   /*
