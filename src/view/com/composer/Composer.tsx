@@ -72,7 +72,7 @@ import {
 import {useIsKeyboardVisible} from '#/lib/hooks/useIsKeyboardVisible'
 import {useNonReactiveCallback} from '#/lib/hooks/useNonReactiveCallback'
 import {useWebMediaQueries} from '#/lib/hooks/useWebMediaQueries'
-import { getInterventionConfig, type InterventionConfig } from '#/lib/interventionEngine';
+import { getInterventionConfig, type InterventionConfig, type InterventionPosition } from '#/lib/interventionEngine';
 import {mimeToExt} from '#/lib/media/video/util'
 import {useCallOnce} from '#/lib/once'
 import {type NavigationProp} from '#/lib/routes/types'
@@ -197,6 +197,7 @@ export const ComposePost = ({
   cancelRef?: React.RefObject<CancelRef | null>
 }) => {
   const {currentAccount} = useSession()
+  const t = useTheme() // <--- ADD THIS LINE RIGHT HERE
   const ax = useAnalytics()
   const agent = useAgent()
   const queryClient = useQueryClient()
@@ -234,42 +235,24 @@ export const ComposePost = ({
   });
   // --- TELEMETRY TRACKER END ---
 
-  
-
-  
   const [isKeyboardVisible] = useIsKeyboardVisible({iosUseWillEvents: true})
   const [isPublishing, setIsPublishing] = useState(false)
   const [publishingStage, setPublishingStage] = useState('')
   const [error, setError] = useState('')
   const [hasLoggedFirstKeystroke, setHasLoggedFirstKeystroke] = useState(false);
-  /**
-   * Track when a draft was created so we can measure draft age in metrics.
-   * Set when a draft is loaded via handleSelectDraft.
-   */
+
   const [loadedDraftCreatedAt, setLoadedDraftCreatedAt] = useState<
     string | null
   >(null)
 
-  /**
-   * A temporary local reference to a language suggestion that the user has
-   * accepted. This overrides the global post language preference, but is not
-   * stored permanently.
-   */
   const [acceptedLanguageSuggestion, setAcceptedLanguageSuggestion] = useState<
     string | null
   >(null)
 
-  /**
-   * The language(s) of the post being replied to.
-   */
   const [replyToLanguages, setReplyToLanguages] = useState<string[]>(
     replyTo?.langs || [],
   )
 
-  /**
-   * The currently selected languages of the post. Prefer local temporary
-   * language suggestion over global lang prefs, if available.
-   */
   const currentLanguages = useMemo(
     () =>
       acceptedLanguageSuggestion
@@ -278,11 +261,6 @@ export const ComposePost = ({
     [acceptedLanguageSuggestion, langPrefs.postLanguage],
   )
 
-  /**
-   * When the user selects a language from the composer language selector,
-   * clear any temporary language suggestions they may have selected
-   * previously, and any we might try to suggest to them.
-   */
   const onSelectLanguage = () => {
     setAcceptedLanguageSuggestion(null)
     setReplyToLanguages([])
@@ -302,8 +280,6 @@ export const ComposePost = ({
 
   const thread = composerState.thread
 
-  // Clear error when composer content changes, but only if all posts are
-  // back within the character limit.
   const allPostsWithinLimit = thread.posts.every(
     post => post.richtext.graphemeLength <= MAX_DRAFT_GRAPHEME_LENGTH,
   )
@@ -322,7 +298,6 @@ export const ComposePost = ({
     [activePost.id],
   )
 
-  
   const selectVideo = React.useCallback(
     (postId: string, asset: ImagePickerAsset) => {
       const abortController = new AbortController()
@@ -403,7 +378,6 @@ export const ComposePost = ({
         let asset: ImagePickerAsset
 
         if (IS_WEB) {
-          // Web: Convert blob URL to a File, then get video metadata (returns data URL)
           const response = await fetch(videoInfo.uri)
           const blob = await response.blob()
           const file = new File([blob], 'restored-video', {
@@ -413,9 +387,6 @@ export const ComposePost = ({
         } else {
           let uri = videoInfo.uri
           if (IS_ANDROID) {
-            // Android: expo-file-system double-encodes filenames with special chars.
-            // The file exists, but react-native-compressor's MediaMetadataRetriever
-            // can't handle the double-encoded URI. Copy to a temp file with a simple name.
             const sourceFile = new FileSystem.File(videoInfo.uri)
             const tempFileName = `draft-video-${Date.now()}.${mimeToExt(videoInfo.mimeType)}`
             const tempFile = new FileSystem.File(
@@ -432,7 +403,6 @@ export const ComposePost = ({
           asset = await getVideoMetadata(uri)
         }
 
-        // Start video processing using existing flow
         const abortController = new AbortController()
         composerDispatch({
           type: 'update_post',
@@ -444,7 +414,6 @@ export const ComposePost = ({
           },
         })
 
-        // Restore alt text immediately
         if (videoInfo.altText) {
           composerDispatch({
             type: 'update_post',
@@ -460,7 +429,6 @@ export const ComposePost = ({
           })
         }
 
-        // Restore captions (web only - captions use File objects)
         if (IS_WEB && videoInfo.captions.length > 0) {
           const captionTracks = videoInfo.captions.map(c => ({
             lang: c.lang,
@@ -482,7 +450,6 @@ export const ComposePost = ({
           })
         }
 
-        // Start video compression and upload
         processVideo(
           asset,
           videoAction => {
@@ -516,10 +483,7 @@ export const ComposePost = ({
         draftId: draftSummary.id,
       })
 
-      // Load local media files for the draft
       const {loadedMedia} = await loadDraftMedia(draftSummary.draft)
-
-      // Extract original localRefs for orphan detection on save
       const originalLocalRefs = extractLocalRefs(draftSummary.draft)
 
       logger.debug('draft loaded', {
@@ -528,13 +492,11 @@ export const ComposePost = ({
         originalLocalRefCount: originalLocalRefs.size,
       })
 
-      // Convert server draft to composer posts (videos returned separately)
       const {posts, restoredVideos} = await draftToComposerPosts(
         draftSummary.draft,
         loadedMedia,
       )
 
-      // Dispatch restore action (this also sets draftId in state)
       composerDispatch({
         type: 'restore_from_draft',
         draftId: draftSummary.id,
@@ -545,24 +507,15 @@ export const ComposePost = ({
         originalLocalRefs,
       })
 
-      // Track when the draft was created for metrics
       setLoadedDraftCreatedAt(draftSummary.createdAt)
       
-      // --- NEW TELEMETRY ---
       logTelemetry('DRAFT_LOADED', { 
         draftId: draftSummary.id,
         postCount: draftSummary.posts.length,
         hasMedia: loadedMedia.size > 0,
-        
-        // ADD THIS: Grabs the text of the first post in the draft
         text: draftSummary.posts[0]?.text || '',
-        
-        // (Optional) If you want the text of EVERY post in a drafted thread, 
-        // you can map the whole array instead:
-        // allTexts: draftSummary.posts.map(p => p.text)
       });
 
-      // Fire draft:load metric
       const draftPosts = draftSummary.posts
       const draftAgeMs = Date.now() - new Date(draftSummary.createdAt).getTime()
       ax.metric('draft:load', {
@@ -574,8 +527,6 @@ export const ComposePost = ({
         postCount: draftPosts.length,
       })
 
-      // Initiate video processing for any restored videos
-      // This is async but we don't await - videos process in the background
       for (const [postIndex, videoInfo] of restoredVideos) {
         const postId = posts[postIndex].id
         restoreVideo(postId, videoInfo)
@@ -630,7 +581,6 @@ export const ComposePost = ({
         existingDraftId: composerState.draftId,
       })
 
-      // --- NEW TELEMETRY ---
       const posts = composerState.thread.posts;
       logTelemetry('DRAFT_SAVED', {
         isNewDraft: !composerState.draftId,
@@ -640,7 +590,6 @@ export const ComposePost = ({
 
       composerDispatch({type: 'mark_saved', draftId: result.draftId})
 
-      // Fire draft:save metric
       ax.metric('draft:save', {
         isNewDraft,
         hasText: posts.some(p => p.richtext.text.trim().length > 0),
@@ -668,7 +617,6 @@ export const ComposePost = ({
     getDraftSaveError,
   ])
 
-  // Save without closing - for use by DraftsButton
   const saveCurrentDraft = React.useCallback(async (): Promise<{
     success: boolean
   }> => {
@@ -695,7 +643,6 @@ export const ComposePost = ({
     getDraftSaveError,
   ])
 
-  // Handle discard action - fires metric and closes composer
   const handleDiscard = React.useCallback(() => {
     logTelemetry('POST_DISCARDED', { 
       textLength: activePost.richtext.text.length,
@@ -716,25 +663,16 @@ export const ComposePost = ({
     onClose()
   }, [thread.posts, ax, onClose])
 
-  // Check if composer is empty (no content to save)
   const isComposerEmpty = React.useMemo(() => {
-    // Has multiple posts means it's not empty
     if (thread.posts.length > 1) return false
-
     const firstPost = thread.posts[0]
-    // Has text
     if (firstPost.richtext.text.trim().length > 0) return false
-    // Has media
     if (firstPost.embed.media) return false
-    // Has quote
     if (firstPost.embed.quote) return false
-    // Has link
     if (firstPost.embed.link) return false
-
     return true
   }, [thread.posts])
 
-  // Clear the composer (discard current content)
   const handleClearComposer = React.useCallback(() => {
     composerDispatch({
       type: 'clear',
@@ -747,11 +685,7 @@ export const ComposePost = ({
     () => ({
       paddingTop: IS_ANDROID ? insets.top : 0,
       paddingBottom:
-        // iOS - when keyboard is closed, keep the bottom bar in the safe area
         (IS_IOS && !isKeyboardVisible) ||
-        // Android - Android >=35 KeyboardAvoidingView adds double padding when
-        // keyboard is closed, so we subtract that in the offset and add it back
-        // here when the keyboard is open
         (IS_ANDROID && isKeyboardVisible)
           ? insets.bottom
           : 0,
@@ -769,9 +703,6 @@ export const ComposePost = ({
         post.shortenedGraphemeLength > 0 || post.embed.media || post.embed.link,
     )
 
-    // Show discard prompt if there's content AND either:
-    // - No draft is loaded (new composition)
-    // - Draft is loaded but has been modified
     if (hasContent && (!composerState.draftId || composerState.isDirty)) {
       closeAllDialogs()
       Keyboard.dismiss()
@@ -790,7 +721,6 @@ export const ComposePost = ({
 
   useImperativeHandle(cancelRef, () => ({onPressCancel}))
 
-  // On Android, pressing Back should ask confirmation.
   useEffect(() => {
     if (!IS_ANDROID) {
       return
@@ -845,8 +775,6 @@ export const ComposePost = ({
           post.embed.media.video.status === 'error'
         ),
     )
-  
-
 
   const onPressPublish = React.useCallback(async () => {
     if (isPublishing) {
@@ -885,10 +813,6 @@ export const ComposePost = ({
         })
       ).uris[0]
 
-      /*
-       * Wait for app view to have received the post(s). If this fails, it's
-       * ok, because the post _was_ actually published above.
-       */
       try {
         if (postUri) {
           logger.info(`composer: waiting for app view`)
@@ -973,9 +897,7 @@ export const ComposePost = ({
     if (postUri && !replyTo) {
       emitPostCreated()
     }
-    // Clean up draft and its media after successful publish
     if (composerState.draftId && composerState.originalLocalRefs) {
-      // Fire draft:post metric
       if (loadedDraftCreatedAt) {
         const draftAgeMs = Date.now() - new Date(loadedDraftCreatedAt).getTime()
         ax.metric('draft:post', {
@@ -999,7 +921,6 @@ export const ComposePost = ({
     });
     setLangPrefs.savePostLanguageToHistory()
     if (initQuote) {
-      // We want to wait for the quote count to update before we call `onPost`, which will refetch data
       whenAppViewReady(agent, initQuote.uri, res => {
         const anchor = res.data.thread.at(0)
         if (
@@ -1067,12 +988,142 @@ export const ComposePost = ({
     loadedDraftCreatedAt,
   ])
   
-  // --- MODSKY INTERVENTION LOGIC START ---
+// --- MODSKY INTERVENTION LOGIC START ---
+  // 1. Initialize synchronously so the first render is absolutely perfect.
+  const [interventionState] = useState<InterventionConfig>(() => getInterventionConfig());
+  const [isFakeLoading, setIsFakeLoading] = useState(interventionState.isVisible);
+  const [isComposerRevealed, setIsComposerRevealed] = useState(!interventionState.isVisible);
 
-  const [interventionState, setInterventionState] = useState<InterventionConfig | null>(null);
-  const [isFakeLoading, setIsFakeLoading] = useState(false);
-  const [hasSeenIntervention, setHasSeenIntervention] = useState(false);
+  useEffect(() => {
+    if (!interventionState.isVisible) {
+      logTelemetry('INTERVENTION_CONTROL_GROUP');
+      return;
+    }
 
+    logTelemetry('INTERVENTION_STARTED', { ...interventionState });
+
+    // Check if we are dealing with the special placeholder intervention
+    const isPlaceholder = interventionState.position === 'placeholder';
+
+    if (isPlaceholder) {
+      // FOR PLACEHOLDER: The text is already visible inside the box!
+      // Keep the fake loading spinner spinning and the box locked for the ENTIRE duration.
+      const totalDelay = interventionState.loadingDuration + 2500; // Combine loading + reading time
+      
+      const combinedTimer = setTimeout(() => {
+        setIsFakeLoading(false);      // Kills the spinner, unlocks the text box
+        setIsComposerRevealed(true);  // Fades in the rest of the UI
+        logTelemetry('INTERVENTION_REVEALED'); // Log it all at once
+        
+        if (!IS_ANDROID && textInput.current) {
+          textInput.current.focus();
+        }
+      }, totalDelay);
+
+      return () => clearTimeout(combinedTimer);
+
+    } else {
+      // FOR STANDARD BANNERS (Top, Middle, Bottom): 
+      // PHASE 1 -> 2: Stop fake loading, reveal the intervention text banner
+      let readingTimer: NodeJS.Timeout;
+      
+      const loadingTimer = setTimeout(() => {
+        setIsFakeLoading(false);
+        logTelemetry('INTERVENTION_REVEALED');
+        
+        // PHASE 2 -> 3: Wait 2.5 seconds for them to read the text, THEN reveal composer
+        const readingDelayMs = 2500; 
+        readingTimer = setTimeout(() => {
+          setIsComposerRevealed(true);
+          
+          if (!IS_ANDROID && textInput.current) {
+            textInput.current.focus();
+          }
+        }, readingDelayMs);
+
+      }, interventionState.loadingDuration);
+
+      return () => {
+        clearTimeout(loadingTimer);
+        clearTimeout(readingTimer);
+      };
+    }
+  }, [interventionState, logTelemetry]);
+
+  // --- MODSKY: Render the intervention banner ---
+  const renderIntervention = (targetPosition: InterventionPosition) => {
+    if (!interventionState.isVisible) return null;
+
+    // If it's a new post (no replyTo) and it rolled 'middle', treat it as 'top'
+    const effectivePosition = interventionState.position === 'middle' && !replyTo 
+      ? 'top' 
+      : interventionState.position;
+
+    // The 'placeholder' position is handled entirely inside ComposerPost's TextInput. 
+    // We do not render a floating banner for it.
+    if (effectivePosition === 'placeholder') {
+      // For placeholder, we show the loading spinner in the 'middle' slot above the text box
+      if (targetPosition === 'middle' && isFakeLoading) {
+        return (
+          <Animated.View entering={FadeIn} style={[a.w_full, a.px_lg, a.py_md, t.atoms.bg_contrast_25, { borderRadius: 12, marginHorizontal: 16, width: 'auto', marginBottom: 16 }]}>
+            <View style={[a.align_center, a.justify_center, { minHeight: 24 }]}>
+              {interventionState.loadingType === 'circle' && <ActivityIndicator size="small" color={t.palette.primary_500} />}
+              {interventionState.loadingType === 'lines' && <Text style={[t.atoms.text_contrast_low]}>- - - - -</Text>}
+              {interventionState.loadingType === 'placeholder' && <Text style={[t.atoms.text_contrast_low]}>Preparing...</Text>}
+            </View>
+          </Animated.View>
+        );
+      }
+      return null; 
+    }
+
+    if (effectivePosition !== targetPosition) {
+      return null;
+    }
+
+    return (
+      <Animated.View entering={FadeIn} style={[a.w_full, a.px_lg, a.py_md, t.atoms.bg_contrast_25, { borderRadius: 12, marginHorizontal: 16, width: 'auto', marginBottom: 16 }]}>
+        {isFakeLoading ? (
+          // Fake Loading State
+          <View style={[a.align_center, a.justify_center, { minHeight: 24 }]}>
+            {interventionState.loadingType === 'circle' && <ActivityIndicator size="small" color={t.palette.primary_500} />}
+            {interventionState.loadingType === 'lines' && <Text style={[t.atoms.text_contrast_low]}>- - - - -</Text>}
+            {interventionState.loadingType === 'placeholder' && <Text style={[t.atoms.text_contrast_low]}>Preparing...</Text>}
+          </View>
+        ) : (
+          // Revealed Persistent State
+          <View style={[a.flex_row, a.align_center, a.gap_sm]}>
+            {interventionState.hasIcon && <CircleInfoIcon size="md" />}
+            <Text style={[a.flex_1, a.text_md, a.font_bold, t.atoms.text]}>
+              {interventionState.text}
+            </Text>
+          </View>
+        )}
+      </Animated.View>
+    );
+  };
+
+  // 1. General Fade (Reply context, Footers) - Hides until the reading timer is done
+  const generalOpacity = useDerivedValue(() => {
+    return withTiming(isComposerRevealed ? 1 : 0, { duration: 500 });
+  }, [isComposerRevealed]);
+
+  const generalFadeStyle = useAnimatedStyle(() => ({
+    opacity: generalOpacity.value,
+  }));
+
+  // 2. Text Box Fade (ComposerPost) - Hides until revealed, UNLESS it is the 'placeholder'
+  // If it's the placeholder, we force it to be visible immediately so they can read the message!
+  const showTextBox = isComposerRevealed || interventionState?.position === 'placeholder';
+  const textBoxOpacity = useDerivedValue(() => {
+    return withTiming(showTextBox ? 1 : 0, { duration: 500 });
+  }, [showTextBox]);
+
+  const textBoxFadeStyle = useAnimatedStyle(() => ({
+    opacity: textBoxOpacity.value,
+  }));
+
+  
   // --- DEBOUNCED TEXT CAPTURE START ---
   const currentText = activePost?.richtext.text || '';
   
@@ -1098,60 +1149,10 @@ export const ComposePost = ({
   }, [currentText, logTelemetry, interventionState, hasLoggedFirstKeystroke]);
   // --- DEBOUNCED TEXT CAPTURE END ---
   
-
-  const handlePublishIntent = useNonReactiveCallback(() => {
-    const exactCurrentText = activePost?.richtext.text || '';
-
-    logTelemetry('PUBLISH_ATTEMPTED', { 
-      canPost, 
-      isPublishing,
-      text: exactCurrentText
-    });
-
-    if (!canPost || isPublishing) {
-      onPressPublish();
-      return;
-    }
-
-    if (hasSeenIntervention) {
-      logTelemetry('PUBLISH_AFTER_EDIT', { text: exactCurrentText });
-      onPressPublish();
-      return;
-    }
-
-    const config = getInterventionConfig();
-
-    if (!config.isVisible) {
-      logTelemetry('PUBLISH_NO_INTERVENTION', { text: exactCurrentText });
-      onPressPublish();
-      return;
-    }
-
-    // --- START MRT INTERVENTION FLOW ---
-    setHasSeenIntervention(true);
-    
-    // 1. Set the state IMMEDIATELY so the popup knows where to position itself
-    // and what type of loading animation to show.
-    setInterventionState(config); 
-    setIsFakeLoading(true); 
-    
-    logTelemetry('INTERVENTION_OPENED', { 
-      ...config, 
-      userText: exactCurrentText 
-    });
-
-    // 2. Wait for the random loading duration, then turn OFF the loading phase
-    // to reveal the text and buttons.
-    setTimeout(() => {
-      setIsFakeLoading(false);
-    }, config.loadingDuration);
-  });
-  // --- MODSKY INTERVENTION LOGIC END ---
-
   // Preserves the referential identity passed to each post item.
   // Avoids re-rendering all posts on each keystroke.
   const onComposerPostPublish = useNonReactiveCallback(() => {
-    handlePublishIntent()
+    onPressPublish(); // Restored to default
   })
 
   React.useEffect(() => {
@@ -1211,10 +1212,13 @@ export const ComposePost = ({
       // On Android, this risks getting the cursor stuck behind the keyboard.
       // Not worth it.
       if (!IS_ANDROID) {
-        textInput.current?.focus()
+        // Prevent autofocus if we are fake loading
+        if (!isFakeLoading) {
+           textInput.current?.focus()
+        }
       }
     }
-  }, [composerState])
+  }, [composerState, isFakeLoading])
 
   const isLastThreadedPost = thread.posts.length > 1 && nextPost === undefined
   const {
@@ -1288,7 +1292,7 @@ export const ComposePost = ({
             publishingStage={publishingStage}
             topBarAnimatedStyle={topBarAnimatedStyle}
             onCancel={onPressCancel}
-            onPublish={handlePublishIntent}
+            onPublish={onPressPublish}
             onSelectDraft={handleSelectDraft}
             onSaveDraft={saveCurrentDraft}
             onDiscard={handleClearComposer}
@@ -1310,42 +1314,83 @@ export const ComposePost = ({
             />
           </ComposerTopBar>
 
+          {/* --- COMPOSER BODY --- */}
           <Animated.ScrollView
             ref={scrollViewRef}
             layout={native(LinearTransition)}
             onScroll={scrollHandler}
             contentContainerStyle={a.flex_grow}
             style={a.flex_1}
+            // Block touches completely while fake loading
+            pointerEvents={isFakeLoading ? 'none' : 'auto'} 
             keyboardShouldPersistTaps="always"
             onContentSizeChange={onScrollViewContentSizeChange}
             onLayout={onScrollViewLayout}>
-            {replyTo ? <ComposerReplyTo replyTo={replyTo} /> : undefined}
+
+            {/* POSITION 1: TOP (Always visible if active) */}
+            {renderIntervention('top')}
+
+            {/* The Original Post Context - Uses GENERAL fade */}
+            {replyTo ? (
+              <Animated.View style={generalFadeStyle} pointerEvents={isComposerRevealed ? 'auto' : 'none'}>
+                <ComposerReplyTo replyTo={replyTo} />
+              </Animated.View>
+            ) : null}
+
+            {/* POSITION 2: MIDDLE (Always visible if active) */}
+            {renderIntervention('middle')}
+
+            {/* The User's Text Input Box - Uses TEXT BOX fade */}
             {thread.posts.map((post, index) => (
               <React.Fragment key={post.id + (composerState.draftId ?? '')}>
-                <ComposerPost
-                  post={post}
-                  dispatch={composerDispatch}
-                  textInput={post.id === activePost.id ? textInput : null}
-                  isFirstPost={index === 0}
-                  isLastPost={index === thread.posts.length - 1}
-                  isPartOfThread={thread.posts.length > 1}
-                  isReply={index > 0 || !!replyTo}
-                  isActive={post.id === activePost.id}
-                  canRemovePost={thread.posts.length > 1}
-                  canRemoveQuote={index > 0 || !initQuote}
-                  onSelectVideo={selectVideo}
-                  onClearVideo={clearVideo}
-                  onPublish={onComposerPostPublish}
-                  onError={setError}
-                  logTelemetry={logTelemetry} // <--- ADD THIS HERE
-                />
+                <Animated.View style={textBoxFadeStyle} pointerEvents={isComposerRevealed ? 'auto' : 'none'}>
+                  <ComposerPost
+                    post={post}
+                    dispatch={composerDispatch}
+                    textInput={post.id === activePost.id ? textInput : null}
+                    isFirstPost={index === 0}
+                    isLastPost={index === thread.posts.length - 1}
+                    isPartOfThread={thread.posts.length > 1}
+                    isReply={index > 0 || !!replyTo}
+                    isActive={post.id === activePost.id}
+                    canRemovePost={thread.posts.length > 1}
+                    canRemoveQuote={index > 0 || !initQuote}
+                    onSelectVideo={selectVideo}
+                    onClearVideo={clearVideo}
+                    onPublish={onComposerPostPublish}
+                    onError={setError}
+                    logTelemetry={logTelemetry}
+                    // MODSKY PASSDOWNS:
+                    isFakeLoading={isFakeLoading}
+                    placeholderOverride={
+                      interventionState?.position === 'placeholder' 
+                        ? interventionState.text 
+                        : undefined
+                    }
+                    isInterventionActive={!!interventionState}
+                  />
+                </Animated.View>
+                
                 {IS_WEBFooterSticky && post.id === activePost.id && (
-                  <View style={styles.stickyFooterWeb}>{footer}</View>
+                  <View style={styles.stickyFooterWeb}>
+                    <Animated.View style={generalFadeStyle} pointerEvents={isComposerRevealed ? 'auto' : 'none'}>
+                       {footer}
+                    </Animated.View>
+                  </View>
                 )}
               </React.Fragment>
             ))}
+
+            {/* POSITION 4: BOTTOM (Always visible if active) */}
+            {renderIntervention('bottom')}
+
           </Animated.ScrollView>
-          {!IS_WEBFooterSticky && footer}
+          
+          {!IS_WEBFooterSticky && (
+             <Animated.View style={generalFadeStyle} pointerEvents={isComposerRevealed ? 'auto' : 'none'}>
+                {footer}
+             </Animated.View>
+          )}
         </View>
 
         {replyTo ? (
@@ -1409,79 +1454,6 @@ export const ComposePost = ({
             </Prompt.Actions>
           </Prompt.Outer>
         )}
-        {/* --- MODSKY MRT INTERVENTION UI --- */}
-        {interventionState && (
-          <View style={[
-            StyleSheet.absoluteFillObject,
-            { zIndex: 9999, pointerEvents: 'auto', alignItems: 'center' },
-            interventionState?.type === 'blanket' && { backgroundColor: 'rgba(0,0,0,0.4)' }
-          ]}>
-            <View style={[
-              {
-                position: 'absolute',
-                width: '85%', // Centered horizontally
-                backgroundColor: '#FFF', // Static color now
-                padding: 20,
-                borderRadius: 15,
-                shadowColor: '#000',
-                shadowOpacity: 0.2,
-                shadowRadius: 10,
-                elevation: 10,
-              },
-              // Map semantic position to a vertical screen percentage
-              interventionState?.position === 'top' ? { top: '5%' } :
-              interventionState?.position === 'middle' ? { top: '35%' } :
-              interventionState?.position === 'placeholder' ? { top: '55%' } :
-              interventionState?.position === 'bottom' ? { bottom: '5%' } : 
-              { top: '35%' } // Fallback
-            ]}>
-              
-              {isFakeLoading ? (
-                <View style={[a.align_center, a.py_md]}>
-                  {interventionState?.loadingType === 'circle' && <ActivityIndicator size="large" />}
-                  {interventionState?.loadingType === 'lines' && <Text>- - - - -</Text>}
-                  {interventionState?.loadingType === 'placeholder' && <Text style={{opacity: 0.3}}>Writing...</Text>}
-                </View>
-              ) : (
-                <>
-                  <View style={[a.flex_row, a.align_center, a.gap_sm, a.mb_md]}>
-                    {interventionState?.hasIcon && <CircleInfoIcon size="md" />}
-                    <Text style={[a.flex_1, { fontSize: 16, color: '#000', fontWeight: '500' }]}>
-                      {interventionState?.text}
-                    </Text>
-                  </View>
-
-                  <View style={[a.flex_row, a.gap_md]}>
-                    <Button
-                      label="Edit"
-                      size="small"
-                      variant="outline"
-                      style={[a.flex_1]}
-                      onPress={() => {
-                        logTelemetry('INTERVENTION_DECISION_EDIT', { text: activePost?.richtext.text || '' });
-                        setInterventionState(null);
-                      }}>
-                      <ButtonText>Edit</ButtonText>
-                    </Button>
-                    <Button
-                      label="Publish"
-                      size="small"
-                      color="primary"
-                      style={[a.flex_1]}
-                      onPress={() => {
-                        logTelemetry('INTERVENTION_DECISION_BYPASS');
-                        setInterventionState(null);
-                        onPressPublish();
-                      }}>
-                      <ButtonText>Publish</ButtonText>
-                    </Button>
-                  </View>
-                </>
-              )}
-            </View>
-          </View>
-        )}
-        {/* --- MODSKY MRT INTERVENTION UI END --- */}
       </KeyboardAvoidingView>
     </BottomSheetPortalProvider>
   )
@@ -1502,7 +1474,10 @@ let ComposerPost = React.memo(function ComposerPost({
   onSelectVideo,
   onError,
   onPublish,
-  logTelemetry, // <--- Add to destructured props
+  logTelemetry, 
+  isFakeLoading,
+  placeholderOverride,
+  isInterventionActive,
 }: {
   post: PostDraft
   dispatch: (action: ComposerAction) => void
@@ -1518,22 +1493,30 @@ let ComposerPost = React.memo(function ComposerPost({
   onSelectVideo: (postId: string, asset: ImagePickerAsset) => void
   onError: (error: string) => void
   onPublish: (richtext: RichText) => void
-  logTelemetry: (event: string, payload?: any) => void // <--- Add to type definitions
+  logTelemetry: (event: string, payload?: any) => void
+  isFakeLoading: boolean
+  placeholderOverride?: string
+  isInterventionActive: boolean
 }) {
   const {currentAccount} = useSession()
+  const t = useTheme()
   const currentDid = currentAccount!.did
   const {_} = useLingui()
   const {data: currentProfile} = useProfileQuery({did: currentDid})
   const richtext = post.richtext
   const isTextOnly = !post.embed.link && !post.embed.quote && !post.embed.media
   const forceMinHeight = IS_WEB && isTextOnly && isActive
-  const selectTextInputPlaceholder = isReply
-    ? isFirstPost
-      ? _(msg`Write your reply`)
-      : _(msg`Add another post`)
-    : _(msg`What's up?`)
+  
+  // Override the standard placeholder if the intervention is set to 'placeholder'
+  const selectTextInputPlaceholder = placeholderOverride 
+    ? placeholderOverride 
+    : isReply
+      ? isFirstPost
+        ? _(msg`Write your reply`)
+        : _(msg`Add another post`)
+      : _(msg`What's up?`)
   const discardPromptControl = Prompt.usePromptControl()
-
+  
   const dispatchPost = useCallback(
     (action: PostAction) => {
       dispatch({
@@ -1547,20 +1530,19 @@ let ComposerPost = React.memo(function ComposerPost({
 
   const onImageAdd = useCallback(
     (next: ComposerImage[]) => {
-      
       console.log("RAW IMAGE DATA:", next);
 
       const imageMetadata = next.map(img => {
-        const source = img.source || {}; // Look inside the 'source' object!
+        const source = img.source || {}; 
         return {
           width: source.width,
           height: source.height,
-          mimeType: source.mime || source.mimeType, // Catches it depending on how the AT Protocol formatted it
+          mimeType: source.mime || source.mimeType, 
         };
       });
 
       logTelemetry('MEDIA_ADDED', { 
-        type: 'image_selected', // (or 'image_pasted' in ComposerPost)
+        type: 'image_selected', 
         count: next.length,
         metadata: imageMetadata
       });
@@ -1625,37 +1607,43 @@ let ComposerPost = React.memo(function ComposerPost({
           type={currentProfile?.associated?.labeler ? 'labeler' : 'user'}
           style={[a.mt_xs]}
         />
-        <TextInput
-          ref={textInput}
-          style={[a.pt_xs]}
-          richtext={richtext}
-          placeholder={selectTextInputPlaceholder}
-          autoFocus={isLastPost}
-          webForceMinHeight={forceMinHeight}
-          // To avoid overlap with the close button:
-          hasRightPadding={isPartOfThread}
-          isActive={isActive}
-          setRichText={rt => {
-            dispatchPost({type: 'update_richtext', richtext: rt})
-          }}
-          onFocus={() => {
-            dispatch({
-              type: 'focus_post',
-              postId: post.id,
-            })
-          }}
-          onPhotoPasted={onPhotoPasted}
-          onNewLink={onNewLink}
-          onError={onError}
-          onPressPublish={onPublish}
-          accessible={true}
-          accessibilityLabel={_(msg`Write post`)}
-          accessibilityHint={_(
-            msg`Compose posts up to ${plural(MAX_GRAPHEME_LENGTH || 0, {
-              other: '# characters',
-            })} in length`,
-          )}
-        />
+        
+        {/* We use the REAL input, but trap it with pointerEvents="none" during the fake load.
+            We leave editable=true so the native OS doesn't gray it out! */}
+        <View style={[a.flex_1, a.relative]} pointerEvents={isFakeLoading ? 'none' : 'auto'}>
+          <TextInput
+            ref={textInput}
+            editable={true} // Kept true so the placeholder styling stays exactly native
+            caretHidden={isFakeLoading} // Keeps the cursor completely hidden
+            style={[a.pt_xs]}
+            richtext={richtext}
+            placeholder={selectTextInputPlaceholder}
+            autoFocus={isLastPost && !isInterventionActive}
+            webForceMinHeight={forceMinHeight}
+            hasRightPadding={isPartOfThread}
+            isActive={isActive}
+            setRichText={rt => {
+              dispatchPost({type: 'update_richtext', richtext: rt})
+            }}
+            onFocus={() => {
+              dispatch({
+                type: 'focus_post',
+                postId: post.id,
+              })
+            }}
+            onPhotoPasted={onPhotoPasted}
+            onNewLink={onNewLink}
+            onError={onError}
+            onPressPublish={onPublish}
+            accessible={true}
+            accessibilityLabel={_(msg`Write post`)}
+            accessibilityHint={_(
+              msg`Compose posts up to ${plural(MAX_GRAPHEME_LENGTH || 0, {
+                other: '# characters',
+              })} in length`,
+            )}
+          />
+        </View>
       </View>
 
       {canRemovePost && isActive && (
