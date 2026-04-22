@@ -1,4 +1,4 @@
-import {useCallback, useState} from 'react'
+import {useState} from 'react'
 import {View} from 'react-native'
 import type Animated from 'react-native-reanimated'
 import {useAnimatedRef, useScrollViewOffset} from 'react-native-reanimated'
@@ -7,7 +7,7 @@ import {TID} from '@atproto/common-web'
 import {msg} from '@lingui/core/macro'
 import {useLingui} from '@lingui/react'
 import {Trans} from '@lingui/react/macro'
-import {useFocusEffect, useNavigation} from '@react-navigation/native'
+import {useNavigation} from '@react-navigation/native'
 import {type NativeStackScreenProps} from '@react-navigation/native-stack'
 
 import {RECOMMENDED_SAVED_FEEDS, TIMELINE_SAVED_FEED} from '#/lib/constants'
@@ -23,9 +23,7 @@ import {
   usePreferencesQuery,
 } from '#/state/queries/preferences'
 import {type UsePreferencesQueryResponse} from '#/state/queries/preferences/types'
-import {useSetMinimalShellMode} from '#/state/shell'
 import {FeedSourceCard} from '#/view/com/feeds/FeedSourceCard'
-import * as Toast from '#/view/com/util/Toast'
 import {NoFollowingFeed} from '#/screens/Feeds/NoFollowingFeed'
 import {NoSavedFeedsOfAnyType} from '#/screens/Feeds/NoSavedFeedsOfAnyType'
 import {atoms as a, useBreakpoints, useTheme} from '#/alf'
@@ -43,6 +41,7 @@ import {Trash_Stroke2_Corner0_Rounded as TrashIcon} from '#/components/icons/Tra
 import * as Layout from '#/components/Layout'
 import {InlineLinkText} from '#/components/Link'
 import {Loader} from '#/components/Loader'
+import * as Toast from '#/components/Toast'
 import {Text} from '#/components/Typography'
 
 type Props = NativeStackScreenProps<CommonNavigatorParams, 'SavedFeeds'>
@@ -66,7 +65,6 @@ function SavedFeedsInner({
   const t = useTheme()
   const {_} = useLingui()
   const {gtMobile} = useBreakpoints()
-  const setMinimalShellMode = useSetMinimalShellMode()
   const {mutateAsync: overwriteSavedFeeds, isPending: isOverwritePending} =
     useOverwriteSavedFeedsMutation()
   const navigation = useNavigation<NavigationProp>()
@@ -88,12 +86,6 @@ function SavedFeedsInner({
     currentFeeds.every(f => f.type !== 'timeline') && !noSavedFeedsOfAnyType
   const [isDragging, setIsDragging] = useState(false)
 
-  useFocusEffect(
-    useCallback(() => {
-      setMinimalShellMode(false)
-    }, [setMinimalShellMode]),
-  )
-
   const onSaveChanges = async () => {
     try {
       await overwriteSavedFeeds(currentFeeds)
@@ -104,7 +96,9 @@ function SavedFeedsInner({
         navigation.navigate('Feeds')
       }
     } catch (e) {
-      Toast.show(_(msg`There was an issue contacting the server`), 'xmark')
+      Toast.show(_(msg`There was an issue contacting the server`), {
+        type: 'error',
+      })
       logger.error('Failed to toggle pinned feed', {message: e})
     }
   }
@@ -257,7 +251,6 @@ function SavedFeedsA11y({
   const t = useTheme()
   const {_} = useLingui()
   const {gtMobile} = useBreakpoints()
-  const setMinimalShellMode = useSetMinimalShellMode()
   const {mutateAsync: overwriteSavedFeeds, isPending: isOverwritePending} =
     useOverwriteSavedFeedsMutation()
   const navigation = useNavigation<NavigationProp>()
@@ -272,12 +265,6 @@ function SavedFeedsA11y({
   const noFollowingFeed =
     currentFeeds.every(f => f.type !== 'timeline') && !noSavedFeedsOfAnyType
 
-  useFocusEffect(
-    useCallback(() => {
-      setMinimalShellMode(false)
-    }, [setMinimalShellMode]),
-  )
-
   const onSaveChanges = async () => {
     try {
       await overwriteSavedFeeds(currentFeeds)
@@ -288,7 +275,9 @@ function SavedFeedsA11y({
         navigation.navigate('Feeds')
       }
     } catch (e) {
-      Toast.show(_(msg`There was an issue contacting the server`), 'xmark')
+      Toast.show(_(msg`There was an issue contacting the server`), {
+        type: 'error',
+      })
       logger.error('Failed to toggle pinned feed', {message: e})
     }
   }

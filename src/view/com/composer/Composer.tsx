@@ -1,4 +1,6 @@
-import React, {
+import {
+  Fragment,
+  memo,
   useCallback,
   useEffect,
   useImperativeHandle,
@@ -52,9 +54,8 @@ import {
   type BskyAgent,
   type RichText,
 } from '@atproto/api'
-import {msg, plural} from '@lingui/core/macro'
-import {useLingui} from '@lingui/react'
-import {Trans} from '@lingui/react/macro'
+import {plural} from '@lingui/core/macro'
+import {Trans, useLingui} from '@lingui/react/macro'
 import {useNavigation} from '@react-navigation/native'
 import {useQueryClient} from '@tanstack/react-query'
 
@@ -71,8 +72,6 @@ import {
 } from '#/lib/constants'
 import {useIsKeyboardVisible} from '#/lib/hooks/useIsKeyboardVisible'
 import {useNonReactiveCallback} from '#/lib/hooks/useNonReactiveCallback'
-import {useWebMediaQueries} from '#/lib/hooks/useWebMediaQueries'
-import { getInterventionConfig, type InterventionConfig, type InterventionPosition } from '#/lib/interventionEngine';
 import {mimeToExt} from '#/lib/media/video/util'
 import {useCallOnce} from '#/lib/once'
 import {type NavigationProp} from '#/lib/routes/types'
@@ -122,9 +121,10 @@ import {SubtitleDialogBtn} from '#/view/com/composer/videos/SubtitleDialog'
 import {VideoPreview} from '#/view/com/composer/videos/VideoPreview'
 import {VideoTranscodeProgress} from '#/view/com/composer/videos/VideoTranscodeProgress'
 import {UserAvatar} from '#/view/com/util/UserAvatar'
-import {atoms as a, native, useTheme, web} from '#/alf'
+import {atoms as a, native, useBreakpoints, useTheme, web} from '#/alf'
 import {Admonition} from '#/components/Admonition'
 import {Button, ButtonIcon, ButtonText} from '#/components/Button'
+import * as EmojiPicker from '#/components/EmojiPicker'
 import {CircleInfo_Stroke2_Corner0_Rounded as CircleInfoIcon} from '#/components/icons/CircleInfo'
 import {EmojiArc_Stroke2_Corner0_Rounded as EmojiSmileIcon} from '#/components/icons/Emoji'
 import {PlusLarge_Stroke2_Corner0_Rounded as PlusIcon} from '#/components/icons/Plus'
@@ -173,6 +173,7 @@ import {
 import {type TextInputRef} from './text-input/TextInput.types'
 import {getVideoMetadata} from './videos/pickVideo'
 import {clearThumbnailCache} from './videos/VideoTranscodeBackdrop'
+import { getInterventionConfig } from '#/lib/interventionEngine'; // adjust path as needed
 
 
 type CancelRef = {
@@ -186,7 +187,6 @@ export const ComposePost = ({
   onPostSuccess,
   quote: initQuote,
   mention: initMention,
-  openEmojiPicker,
   text: initText,
   imageUris: initImageUris,
   videoUri: initVideoUri,
@@ -197,18 +197,20 @@ export const ComposePost = ({
   cancelRef?: React.RefObject<CancelRef | null>
 }) => {
   const {currentAccount} = useSession()
-  const t = useTheme() // <--- ADD THIS LINE RIGHT HERE
+  const t = useTheme()
   const ax = useAnalytics()
   const agent = useAgent()
   const queryClient = useQueryClient()
   const currentDid = currentAccount!.did
   const {closeComposer} = useComposerControls()
-  const {_} = useLingui()
+  const {t: l, i18n} = useLingui()
   const requireAltTextEnabled = useRequireAltTextEnabled()
   const langPrefs = useLanguagePrefs()
   const setLangPrefs = useLanguagePrefsApi()
-  const textInput = useRef<TextInputRef>(null)
+  const textInputRef = useRef<TextInputRef>(null)
   const discardPromptControl = Prompt.usePromptControl()
+  const emptyPostsPromptControl = Prompt.usePromptControl()
+  const skipEmptyConfirmedRef = useRef(false)
   const {mutateAsync: saveDraft, isPending: _isSavingDraft} =
     useSaveDraftMutation()
   const {mutate: cleanupPublishedDraft} = useCleanupPublishedDraftMutation()
@@ -217,42 +219,39 @@ export const ComposePost = ({
   const {data: preferences} = usePreferencesQuery()
   const navigation = useNavigation<NavigationProp>()
 
-  // --- TELEMETRY TRACKER START ---
-  const telemetryLog = useRef<{
-    event: string;
-    timestamp: number;
-    payload?: any;
-  }[]>([]);
-
-  // Helper function to log events to our dictionary and the console
-  const logTelemetry = useNonReactiveCallback((event: string, payload: any = {}) => {
-    const entry = { event, timestamp: Date.now(), payload };
-    telemetryLog.current.push(entry);
-    console.log(`[Telemetry] ${event}`, JSON.stringify(entry, null, 2));
-    
-    // NOTE: You can eventually hook this up to your backend API
-    // e.g., sendToBackend(entry);
-  });
-  // --- TELEMETRY TRACKER END ---
-
   const [isKeyboardVisible] = useIsKeyboardVisible({iosUseWillEvents: true})
   const [isPublishing, setIsPublishing] = useState(false)
   const [publishingStage, setPublishingStage] = useState('')
   const [error, setError] = useState('')
-  const [hasLoggedFirstKeystroke, setHasLoggedFirstKeystroke] = useState(false);
 
+  /**
+   * Track when a draft was created so we can measure draft age in metrics.
+   * Set when a draft is loaded via handleSelectDraft.
+   */
   const [loadedDraftCreatedAt, setLoadedDraftCreatedAt] = useState<
     string | null
   >(null)
 
+  /**
+   * A temporary local reference to a language suggestion that the user has
+   * accepted. This overrides the global post language preference, but is not
+   * stored permanently.
+   */
   const [acceptedLanguageSuggestion, setAcceptedLanguageSuggestion] = useState<
     string | null
   >(null)
 
+  /**
+   * The language(s) of the post being replied to.
+   */
   const [replyToLanguages, setReplyToLanguages] = useState<string[]>(
     replyTo?.langs || [],
   )
 
+  /**
+   * The currently selected languages of the post. Prefer local temporary
+   * language suggestion over global lang prefs, if available.
+   */
   const currentLanguages = useMemo(
     () =>
       acceptedLanguageSuggestion
@@ -261,6 +260,11 @@ export const ComposePost = ({
     [acceptedLanguageSuggestion, langPrefs.postLanguage],
   )
 
+  /**
+   * When the user selects a language from the composer language selector,
+   * clear any temporary language suggestions they may have selected
+   * previously, and any we might try to suggest to them.
+   */
   const onSelectLanguage = () => {
     setAcceptedLanguageSuggestion(null)
     setReplyToLanguages([])
@@ -280,6 +284,8 @@ export const ComposePost = ({
 
   const thread = composerState.thread
 
+  // Clear error when composer content changes, but only if all posts are
+  // back within the character limit.
   const allPostsWithinLimit = thread.posts.every(
     post => post.richtext.graphemeLength <= MAX_DRAFT_GRAPHEME_LENGTH,
   )
@@ -298,7 +304,7 @@ export const ComposePost = ({
     [activePost.id],
   )
 
-  const selectVideo = React.useCallback(
+  const selectVideo = useCallback(
     (postId: string, asset: ImagePickerAsset) => {
       const abortController = new AbortController()
       composerDispatch({
@@ -310,7 +316,7 @@ export const ComposePost = ({
           abortController,
         },
       })
-      processVideo(
+      void processVideo(
         asset,
         videoAction => {
           composerDispatch({
@@ -325,10 +331,10 @@ export const ComposePost = ({
         agent,
         currentDid,
         abortController.signal,
-        _,
+        i18n,
       )
     },
-    [_, agent, currentDid, composerDispatch],
+    [i18n, agent, currentDid, composerDispatch],
   )
 
   const onInitVideo = useNonReactiveCallback(() => {
@@ -343,7 +349,6 @@ export const ComposePost = ({
 
   // Fire composer:open metric on mount
   useCallOnce(() => {
-    logTelemetry('COMPOSER_OPENED', { isReply: !!replyTo, hasQuote: !!initQuote });
     ax.metric('composer:open', {
       logContext: logContext ?? 'Other',
       isReply: !!replyTo,
@@ -378,6 +383,7 @@ export const ComposePost = ({
         let asset: ImagePickerAsset
 
         if (IS_WEB) {
+          // Web: Convert blob URL to a File, then get video metadata (returns data URL)
           const response = await fetch(videoInfo.uri)
           const blob = await response.blob()
           const file = new File([blob], 'restored-video', {
@@ -387,6 +393,9 @@ export const ComposePost = ({
         } else {
           let uri = videoInfo.uri
           if (IS_ANDROID) {
+            // Android: expo-file-system double-encodes filenames with special chars.
+            // The file exists, but react-native-compressor's MediaMetadataRetriever
+            // can't handle the double-encoded URI. Copy to a temp file with a simple name.
             const sourceFile = new FileSystem.File(videoInfo.uri)
             const tempFileName = `draft-video-${Date.now()}.${mimeToExt(videoInfo.mimeType)}`
             const tempFile = new FileSystem.File(
@@ -403,6 +412,7 @@ export const ComposePost = ({
           asset = await getVideoMetadata(uri)
         }
 
+        // Start video processing using existing flow
         const abortController = new AbortController()
         composerDispatch({
           type: 'update_post',
@@ -414,6 +424,7 @@ export const ComposePost = ({
           },
         })
 
+        // Restore alt text immediately
         if (videoInfo.altText) {
           composerDispatch({
             type: 'update_post',
@@ -429,6 +440,7 @@ export const ComposePost = ({
           })
         }
 
+        // Restore captions (web only - captions use File objects)
         if (IS_WEB && videoInfo.captions.length > 0) {
           const captionTracks = videoInfo.captions.map(c => ({
             lang: c.lang,
@@ -450,7 +462,8 @@ export const ComposePost = ({
           })
         }
 
-        processVideo(
+        // Start video compression and upload
+        void processVideo(
           asset,
           videoAction => {
             composerDispatch({
@@ -465,7 +478,7 @@ export const ComposePost = ({
           agent,
           currentDid,
           abortController.signal,
-          _,
+          i18n,
         )
       } catch (e) {
         logger.error('Failed to restore video from draft', {
@@ -474,16 +487,19 @@ export const ComposePost = ({
         })
       }
     },
-    [_, agent, currentDid, composerDispatch],
+    [i18n, agent, currentDid, composerDispatch],
   )
 
-  const handleSelectDraft = React.useCallback(
+  const handleSelectDraft = useCallback(
     async (draftSummary: DraftSummary) => {
       logger.debug('loading draft for editing', {
         draftId: draftSummary.id,
       })
 
+      // Load local media files for the draft
       const {loadedMedia} = await loadDraftMedia(draftSummary.draft)
+
+      // Extract original localRefs for orphan detection on save
       const originalLocalRefs = extractLocalRefs(draftSummary.draft)
 
       logger.debug('draft loaded', {
@@ -492,11 +508,13 @@ export const ComposePost = ({
         originalLocalRefCount: originalLocalRefs.size,
       })
 
+      // Convert server draft to composer posts (videos returned separately)
       const {posts, restoredVideos} = await draftToComposerPosts(
         draftSummary.draft,
         loadedMedia,
       )
 
+      // Dispatch restore action (this also sets draftId in state)
       composerDispatch({
         type: 'restore_from_draft',
         draftId: draftSummary.id,
@@ -507,15 +525,10 @@ export const ComposePost = ({
         originalLocalRefs,
       })
 
+      // Track when the draft was created for metrics
       setLoadedDraftCreatedAt(draftSummary.createdAt)
-      
-      logTelemetry('DRAFT_LOADED', { 
-        draftId: draftSummary.id,
-        postCount: draftSummary.posts.length,
-        hasMedia: loadedMedia.size > 0,
-        text: draftSummary.posts[0]?.text || '',
-      });
 
+      // Fire draft:load metric
       const draftPosts = draftSummary.posts
       const draftAgeMs = Date.now() - new Date(draftSummary.createdAt).getTime()
       ax.metric('draft:load', {
@@ -527,6 +540,8 @@ export const ComposePost = ({
         postCount: draftPosts.length,
       })
 
+      // Initiate video processing for any restored videos
+      // This is async but we don't await - videos process in the background
       for (const [postIndex, videoInfo] of restoredVideos) {
         const postId = posts[postIndex].id
         restoreVideo(postId, videoInfo)
@@ -538,38 +553,35 @@ export const ComposePost = ({
   const [publishOnUpload, setPublishOnUpload] = useState(false)
 
   const onClose = useCallback(() => {
-    logTelemetry('COMPOSER_CLOSED');
     closeComposer()
     clearThumbnailCache(queryClient)
     revokeAllMediaUrls()
   }, [closeComposer, queryClient])
 
-  const getDraftSaveError = React.useCallback(
+  const getDraftSaveError = useCallback(
     (e: unknown): string => {
       if (e instanceof AppBskyDraftCreateDraft.DraftLimitReachedError) {
-        return _(msg`You've reached the maximum number of drafts`)
+        return l`You've reached the maximum number of drafts`
       }
-      return _(msg`Failed to save draft`)
+      return l`Failed to save draft`
     },
-    [_],
+    [l],
   )
 
-  const validateDraftTextOrError = React.useCallback((): boolean => {
+  const validateDraftTextOrError = useCallback((): boolean => {
     const tooLong = composerState.thread.posts.some(
       post => post.richtext.graphemeLength > MAX_DRAFT_GRAPHEME_LENGTH,
     )
     if (tooLong) {
       setError(
-        _(
-          msg`One or more posts are too long to save as a draft. ${plural(MAX_DRAFT_GRAPHEME_LENGTH, {one: 'The maximum number of characters is # character.', other: 'The maximum number of characters is # characters.'})}`,
-        ),
+        l`One or more posts are too long to save as a draft. ${plural(MAX_DRAFT_GRAPHEME_LENGTH, {one: 'The maximum number of characters is # character.', other: 'The maximum number of characters is # characters.'})}`,
       )
       return false
     }
     return true
-  }, [composerState.thread.posts, _])
+  }, [composerState.thread.posts, l])
 
-  const handleSaveDraft = React.useCallback(async () => {
+  const handleSaveDraft = useCallback(async () => {
     setError('')
     if (!validateDraftTextOrError()) {
       return
@@ -580,16 +592,10 @@ export const ComposePost = ({
         composerState,
         existingDraftId: composerState.draftId,
       })
-
-      const posts = composerState.thread.posts;
-      logTelemetry('DRAFT_SAVED', {
-        isNewDraft: !composerState.draftId,
-        draftId: result.draftId,
-        textLength: posts[0].richtext.text.length
-      });
-
       composerDispatch({type: 'mark_saved', draftId: result.draftId})
 
+      // Fire draft:save metric
+      const posts = composerState.thread.posts
       ax.metric('draft:save', {
         isNewDraft,
         hasText: posts.some(p => p.richtext.text.trim().length > 0),
@@ -617,7 +623,8 @@ export const ComposePost = ({
     getDraftSaveError,
   ])
 
-  const saveCurrentDraft = React.useCallback(async (): Promise<{
+  // Save without closing - for use by DraftsButton
+  const saveCurrentDraft = useCallback(async (): Promise<{
     success: boolean
   }> => {
     setError('')
@@ -643,11 +650,8 @@ export const ComposePost = ({
     getDraftSaveError,
   ])
 
-  const handleDiscard = React.useCallback(() => {
-    logTelemetry('POST_DISCARDED', { 
-      textLength: activePost.richtext.text.length,
-      text: activePost.richtext.text
-    });
+  // Handle discard action - fires metric and closes composer
+  const handleDiscard = useCallback(() => {
     const posts = thread.posts
     const hasContent = posts.some(
       post =>
@@ -663,17 +667,26 @@ export const ComposePost = ({
     onClose()
   }, [thread.posts, ax, onClose])
 
-  const isComposerEmpty = React.useMemo(() => {
+  // Check if composer is empty (no content to save)
+  const isComposerEmpty = useMemo(() => {
+    // Has multiple posts means it's not empty
     if (thread.posts.length > 1) return false
+
     const firstPost = thread.posts[0]
+    // Has text
     if (firstPost.richtext.text.trim().length > 0) return false
+    // Has media
     if (firstPost.embed.media) return false
+    // Has quote
     if (firstPost.embed.quote) return false
+    // Has link
     if (firstPost.embed.link) return false
+
     return true
   }, [thread.posts])
 
-  const handleClearComposer = React.useCallback(() => {
+  // Clear the composer (discard current content)
+  const handleClearComposer = useCallback(() => {
     composerDispatch({
       type: 'clear',
       initInteractionSettings: preferences?.postInteractionSettings,
@@ -685,7 +698,11 @@ export const ComposePost = ({
     () => ({
       paddingTop: IS_ANDROID ? insets.top : 0,
       paddingBottom:
+        // iOS - when keyboard is closed, keep the bottom bar in the safe area
         (IS_IOS && !isKeyboardVisible) ||
+        // Android - Android >=35 KeyboardAvoidingView adds double padding when
+        // keyboard is closed, so we subtract that in the offset and add it back
+        // here when the keyboard is open
         (IS_ANDROID && isKeyboardVisible)
           ? insets.bottom
           : 0,
@@ -694,7 +711,7 @@ export const ComposePost = ({
   )
 
   const onPressCancel = useCallback(() => {
-    if (textInput.current?.maybeClosePopup()) {
+    if (textInputRef.current?.maybeClosePopup()) {
       return
     }
 
@@ -703,6 +720,9 @@ export const ComposePost = ({
         post.shortenedGraphemeLength > 0 || post.embed.media || post.embed.link,
     )
 
+    // Show discard prompt if there's content AND either:
+    // - No draft is loaded (new composition)
+    // - Draft is loaded but has been modified
     if (hasContent && (!composerState.draftId || composerState.isDirty)) {
       closeAllDialogs()
       Keyboard.dismiss()
@@ -721,6 +741,7 @@ export const ComposePost = ({
 
   useImperativeHandle(cancelRef, () => ({onPressCancel}))
 
+  // On Android, pressing Back should ask confirmation.
   useEffect(() => {
     if (!IS_ANDROID) {
       return
@@ -748,35 +769,66 @@ export const ComposePost = ({
       const media = thread.posts[i].embed.media
       if (media) {
         if (media.type === 'images' && media.images.some(img => !img.alt)) {
-          return _(msg`One or more images is missing alt text.`)
+          return l`One or more images is missing alt text.`
         }
         if (media.type === 'gif' && !media.alt) {
-          return _(msg`One or more GIFs is missing alt text.`)
+          return l`One or more GIFs is missing alt text.`
         }
         if (
           media.type === 'video' &&
           media.video.status !== 'error' &&
           !media.video.altText
         ) {
-          return _(msg`One or more videos is missing alt text.`)
+          return l`One or more videos is missing alt text.`
         }
       }
     }
-  }, [thread, requireAltTextEnabled, _])
+  }, [thread, requireAltTextEnabled, l])
 
   const canPost =
     !missingAltError &&
+    thread.posts.some(post => !isEmptyPost(post)) &&
     thread.posts.every(
       post =>
-        post.shortenedGraphemeLength <= MAX_GRAPHEME_LENGTH &&
-        !isEmptyPost(post) &&
-        !(
-          post.embed.media?.type === 'video' &&
-          post.embed.media.video.status === 'error'
-        ),
+        isEmptyPost(post) ||
+        (post.shortenedGraphemeLength <= MAX_GRAPHEME_LENGTH &&
+          !(
+            post.embed.media?.type === 'video' &&
+            post.embed.media.video.status === 'error'
+          )),
     )
 
-  const onPressPublish = React.useCallback(async () => {
+  const getFilteredThread = (): {
+    type: 'none' | 'trailing-only' | 'non-trailing'
+    filteredThread: ThreadDraft
+  } => {
+    const nonEmptyPosts = thread.posts.filter(post => !isEmptyPost(post))
+
+    if (nonEmptyPosts.length === thread.posts.length) {
+      return {type: 'none', filteredThread: thread}
+    }
+
+    let lastNonEmptyIndex = -1
+    for (let i = thread.posts.length - 1; i >= 0; i--) {
+      if (!isEmptyPost(thread.posts[i])) {
+        lastNonEmptyIndex = i
+        break
+      }
+    }
+
+    const hasNonTrailingEmpty = thread.posts.some(
+      (post, i) => i < lastNonEmptyIndex && isEmptyPost(post),
+    )
+
+    const filteredThread: ThreadDraft = {...thread, posts: nonEmptyPosts}
+
+    return {
+      type: hasNonTrailingEmpty ? 'non-trailing' : 'trailing-only',
+      filteredThread,
+    }
+  }
+
+  const onPressPublish = useCallback(async () => {
     if (isPublishing) {
       return
     }
@@ -785,8 +837,15 @@ export const ComposePost = ({
       return
     }
 
+    const {type: emptyType, filteredThread} = getFilteredThread()
+
+    if (emptyType === 'non-trailing' && !skipEmptyConfirmedRef.current) {
+      emptyPostsPromptControl.open()
+      return
+    }
+
     if (
-      thread.posts.some(
+      filteredThread.posts.some(
         post =>
           post.embed.media?.type === 'video' &&
           post.embed.media.video.asset &&
@@ -797,6 +856,7 @@ export const ComposePost = ({
       return
     }
 
+    skipEmptyConfirmedRef.current = false
     setError('')
     setIsPublishing(true)
 
@@ -805,14 +865,30 @@ export const ComposePost = ({
     try {
       logger.info(`composer: posting...`)
       postUri = (
-        await apilib.post(agent, queryClient, {
-          thread,
-          replyTo: replyTo?.uri,
-          onStateChange: setPublishingStage,
-          langs: currentLanguages,
-        })
+        await apilib.post(
+          agent,
+          queryClient,
+          {
+            thread: filteredThread,
+            replyTo: replyTo?.uri,
+            onStateChange: setPublishingStage,
+            langs: currentLanguages,
+          },
+          {
+            highResolutionImages: ax.features.enabled(
+              ax.features.ImageUploadsHighResolution,
+            ),
+            increasedBlobSizeLimit: ax.features.enabled(
+              ax.features.ImageUploadsBlobSize2mbEnabled,
+            ),
+          },
+        )
       ).uris[0]
 
+      /*
+       * Wait for app view to have received the post(s). If this fails, it's
+       * ok, because the post _was_ actually published above.
+       */
       try {
         if (postUri) {
           logger.info(`composer: waiting for app view`)
@@ -824,10 +900,10 @@ export const ComposePost = ({
               const res = await agent.app.bsky.unspecced.getPostThreadV2({
                 anchor: postUri!,
                 above: false,
-                below: thread.posts.length - 1,
+                below: filteredThread.posts.length - 1,
                 branchingFactor: 1,
               })
-              if (res.data.thread.length !== thread.posts.length) {
+              if (res.data.thread.length !== filteredThread.posts.length) {
                 throw new Error(`composer: app view is not ready`)
               }
               if (
@@ -854,16 +930,16 @@ export const ComposePost = ({
     } catch (e: any) {
       logger.error(e, {
         message: `Composer: create post failed`,
-        hasImages: thread.posts.some(p => p.embed.media?.type === 'images'),
+        hasImages: filteredThread.posts.some(
+          p => p.embed.media?.type === 'images',
+        ),
       })
 
       let err = cleanError(e.message)
       if (err.includes('not locate record')) {
-        err = _(
-          msg`We're sorry! The post you are replying to has been deleted.`,
-        )
+        err = l`We're sorry! The post you are replying to has been deleted.`
       } else if (e instanceof EmbeddingDisabledError) {
-        err = _(msg`This post's author has disabled quote posts.`)
+        err = l`This post's author has disabled quote posts.`
       }
       setError(err)
       setIsPublishing(false)
@@ -871,14 +947,14 @@ export const ComposePost = ({
     } finally {
       if (postUri) {
         let index = 0
-        for (let post of thread.posts) {
+        for (let post of filteredThread.posts) {
           ax.metric('post:create', {
             imageCount:
               post.embed.media?.type === 'images'
                 ? post.embed.media.images.length
                 : 0,
             isReply: index > 0 || !!replyTo,
-            isPartOfThread: thread.posts.length > 1,
+            isPartOfThread: filteredThread.posts.length > 1,
             hasLink: !!post.embed.link,
             hasQuote: !!post.embed.quote,
             langs: fromPostLanguages(currentLanguages),
@@ -887,9 +963,9 @@ export const ComposePost = ({
           index++
         }
       }
-      if (thread.posts.length > 1) {
+      if (filteredThread.posts.length > 1) {
         ax.metric('thread:create', {
-          postCount: thread.posts.length,
+          postCount: filteredThread.posts.length,
           isReply: !!replyTo,
         })
       }
@@ -897,7 +973,9 @@ export const ComposePost = ({
     if (postUri && !replyTo) {
       emitPostCreated()
     }
+    // Clean up draft and its media after successful publish
     if (composerState.draftId && composerState.originalLocalRefs) {
+      // Fire draft:post metric
       if (loadedDraftCreatedAt) {
         const draftAgeMs = Date.now() - new Date(loadedDraftCreatedAt).getTime()
         ax.metric('draft:post', {
@@ -915,12 +993,9 @@ export const ComposePost = ({
         originalLocalRefs: composerState.originalLocalRefs,
       })
     }
-    logTelemetry('POST_PUBLISHED_SUCCESSFULLY', { 
-      finalLength: activePost.richtext.text.length,
-      text: activePost.richtext.text
-    });
     setLangPrefs.savePostLanguageToHistory()
     if (initQuote) {
+      // We want to wait for the quote count to update before we call `onPost`, which will refetch data
       whenAppViewReady(agent, initQuote.uri, res => {
         const anchor = res.data.thread.at(0)
         if (
@@ -943,15 +1018,15 @@ export const ComposePost = ({
         <Toast.Outer>
           <Toast.Icon />
           <Toast.Text>
-            {thread.posts.length > 1
-              ? _(msg`Your posts were sent`)
+            {filteredThread.posts.length > 1
+              ? l`Your posts were sent`
               : replyTo
-                ? _(msg`Your reply was sent`)
-                : _(msg`Your post was sent`)}
+                ? l`Your reply was sent`
+                : l`Your post was sent`}
           </Toast.Text>
           {postUri && (
             <Toast.Action
-              label={_(msg`View post`)}
+              label={l`View post`}
               onPress={() => {
                 const {host: name, rkey} = new AtUri(postUri)
                 navigation.navigate('PostThread', {name, rkey})
@@ -966,7 +1041,7 @@ export const ComposePost = ({
       )
     }, 500)
   }, [
-    _,
+    l,
     ax,
     agent,
     thread,
@@ -986,180 +1061,67 @@ export const ComposePost = ({
     composerState.isDirty,
     cleanupPublishedDraft,
     loadedDraftCreatedAt,
+    emptyPostsPromptControl,
+      emptyPostsPromptControl,
   ])
-  
-// --- MODSKY INTERVENTION LOGIC START ---
-  // 1. Initialize synchronously so the first render is absolutely perfect.
-  const [interventionState] = useState<InterventionConfig>(() => getInterventionConfig());
-  const [isFakeLoading, setIsFakeLoading] = useState(interventionState.isVisible);
-  const [isComposerRevealed, setIsComposerRevealed] = useState(!interventionState.isVisible);
 
-  useEffect(() => {
-    if (!interventionState.isVisible) {
-      logTelemetry('INTERVENTION_CONTROL_GROUP');
+  const handleConfirmSkipEmpty = () => {
+    skipEmptyConfirmedRef.current = true
+    void onPressPublish()
+  }
+  // --- MODSKY INTERVENTION LOGIC START ---
+  const [interventionState, setInterventionState] = useState<{
+    isVisible: boolean;
+    type: 'blanket' | 'adapted';
+    text: string;
+    color: string;
+    position: number;
+  } | null>(null);
+
+  const handlePublishIntent = React.useCallback(() => {
+    // If the composer is empty or invalid, let the normal function handle it
+    if (!canPost || isPublishing) {
+      onPressPublish();
       return;
     }
 
-    logTelemetry('INTERVENTION_STARTED', { ...interventionState });
+    // Call your new external file for the logic
+    const config = getInterventionConfig();
 
-    // Check if we are dealing with the special placeholder intervention
-    const isPlaceholder = interventionState.position === 'placeholder';
-
-    if (isPlaceholder) {
-      // FOR PLACEHOLDER: The text is already visible inside the box!
-      // Keep the fake loading spinner spinning and the box locked for the ENTIRE duration.
-      const totalDelay = interventionState.loadingDuration + 2500; // Combine loading + reading time
-      
-      const combinedTimer = setTimeout(() => {
-        setIsFakeLoading(false);      // Kills the spinner, unlocks the text box
-        setIsComposerRevealed(true);  // Fades in the rest of the UI
-        logTelemetry('INTERVENTION_REVEALED'); // Log it all at once
-        
-        if (!IS_ANDROID && textInput.current) {
-          textInput.current.focus();
-        }
-      }, totalDelay);
-
-      return () => clearTimeout(combinedTimer);
-
+    if (!config.isVisible) {
+      // 33% chance: No intervention, publish normally
+      onPressPublish();
     } else {
-      // FOR STANDARD BANNERS (Top, Middle, Bottom): 
-      // PHASE 1 -> 2: Stop fake loading, reveal the intervention text banner
-      let readingTimer: NodeJS.Timeout;
-      
-      const loadingTimer = setTimeout(() => {
-        setIsFakeLoading(false);
-        logTelemetry('INTERVENTION_REVEALED');
-        
-        // PHASE 2 -> 3: Wait 2.5 seconds for them to read the text, THEN reveal composer
-        const readingDelayMs = 2500; 
-        readingTimer = setTimeout(() => {
-          setIsComposerRevealed(true);
-          
-          if (!IS_ANDROID && textInput.current) {
-            textInput.current.focus();
-          }
-        }, readingDelayMs);
-
-      }, interventionState.loadingDuration);
-
-      return () => {
-        clearTimeout(loadingTimer);
-        clearTimeout(readingTimer);
-      };
-    }
-  }, [interventionState, logTelemetry]);
-
-  // --- MODSKY: Render the intervention banner ---
-  const renderIntervention = (targetPosition: InterventionPosition) => {
-    if (!interventionState.isVisible) return null;
-
-    // If it's a new post (no replyTo) and it rolled 'middle', treat it as 'top'
-    const effectivePosition = interventionState.position === 'middle' && !replyTo 
-      ? 'top' 
-      : interventionState.position;
-
-    // The 'placeholder' position is handled entirely inside ComposerPost's TextInput. 
-    // We do not render a floating banner for it.
-    if (effectivePosition === 'placeholder') {
-      // For placeholder, we show the loading spinner in the 'middle' slot above the text box
-      if (targetPosition === 'middle' && isFakeLoading) {
-        return (
-          <Animated.View entering={FadeIn} style={[a.w_full, a.px_lg, a.py_md, t.atoms.bg_contrast_25, { borderRadius: 12, marginHorizontal: 16, width: 'auto', marginBottom: 16 }]}>
-            <View style={[a.align_center, a.justify_center, { minHeight: 24 }]}>
-              {interventionState.loadingType === 'circle' && <ActivityIndicator size="small" color={t.palette.primary_500} />}
-              {interventionState.loadingType === 'lines' && <Text style={[t.atoms.text_contrast_low]}>- - - - -</Text>}
-              {interventionState.loadingType === 'placeholder' && <Text style={[t.atoms.text_contrast_low]}>Preparing...</Text>}
-            </View>
-          </Animated.View>
-        );
-      }
-      return null; 
-    }
-
-    if (effectivePosition !== targetPosition) {
-      return null;
-    }
-
-    return (
-      <Animated.View entering={FadeIn} style={[a.w_full, a.px_lg, a.py_md, t.atoms.bg_contrast_25, { borderRadius: 12, marginHorizontal: 16, width: 'auto', marginBottom: 16 }]}>
-        {isFakeLoading ? (
-          // Fake Loading State
-          <View style={[a.align_center, a.justify_center, { minHeight: 24 }]}>
-            {interventionState.loadingType === 'circle' && <ActivityIndicator size="small" color={t.palette.primary_500} />}
-            {interventionState.loadingType === 'lines' && <Text style={[t.atoms.text_contrast_low]}>- - - - -</Text>}
-            {interventionState.loadingType === 'placeholder' && <Text style={[t.atoms.text_contrast_low]}>Preparing...</Text>}
-          </View>
-        ) : (
-          // Revealed Persistent State
-          <View style={[a.flex_row, a.align_center, a.gap_sm]}>
-            {interventionState.hasIcon && <CircleInfoIcon size="md" />}
-            <Text style={[a.flex_1, a.text_md, a.font_bold, t.atoms.text]}>
-              {interventionState.text}
-            </Text>
-          </View>
-        )}
-      </Animated.View>
-    );
-  };
-
-  // 1. General Fade (Reply context, Footers) - Hides until the reading timer is done
-  const generalOpacity = useDerivedValue(() => {
-    return withTiming(isComposerRevealed ? 1 : 0, { duration: 500 });
-  }, [isComposerRevealed]);
-
-  const generalFadeStyle = useAnimatedStyle(() => ({
-    opacity: generalOpacity.value,
-  }));
-
-  // 2. Text Box Fade (ComposerPost) - Hides until revealed, UNLESS it is the 'placeholder'
-  // If it's the placeholder, we force it to be visible immediately so they can read the message!
-  const showTextBox = isComposerRevealed || interventionState?.position === 'placeholder';
-  const textBoxOpacity = useDerivedValue(() => {
-    return withTiming(showTextBox ? 1 : 0, { duration: 500 });
-  }, [showTextBox]);
-
-  const textBoxFadeStyle = useAnimatedStyle(() => ({
-    opacity: textBoxOpacity.value,
-  }));
-
-  
-  // --- DEBOUNCED TEXT CAPTURE START ---
-  const currentText = activePost?.richtext.text || '';
-  
-  useEffect(() => {
-    if (!currentText) return;
-
-    // --- NEW TELEMETRY ---
-    if (!hasLoggedFirstKeystroke) {
-      logTelemetry('FIRST_KEYSTROKE_LOGGED', { textLength: currentText.length });
-      setHasLoggedFirstKeystroke(true);
-    }
-
-    const timeoutId = setTimeout(() => {
-      // This runs if the user hasn't typed anything new for 1 second
-      logTelemetry('TEXT_INTERMEDIATE_SNAPSHOT', { 
-        text: currentText, 
-        length: currentText.length,
-        isAfterIntervention: !!interventionState // Helpful to know if they are revising
+      // 66% chance: Show either blanket or adapted intervention
+      setInterventionState({
+        isVisible: true,
+        type: config.type as 'blanket' | 'adapted',
+        text: config.text!,
+        color: config.color!,
+        position: config.position!,
       });
-    }, 1000); // 1000ms = 1 second
+    }
+  }, [canPost, isPublishing, onPressPublish]);
+  // --- MODSKY INTERVENTION LOGIC END ---
 
-    return () => clearTimeout(timeoutId);
-  }, [currentText, logTelemetry, interventionState, hasLoggedFirstKeystroke]);
-  // --- DEBOUNCED TEXT CAPTURE END ---
-  
+  const handleConfirmSkipEmpty = () => {
+    skipEmptyConfirmedRef.current = true
+    void onPressPublish()
+  }
+
   // Preserves the referential identity passed to each post item.
   // Avoids re-rendering all posts on each keystroke.
   const onComposerPostPublish = useNonReactiveCallback(() => {
-    onPressPublish(); // Restored to default
+    void handlePublishIntent()
+    void onPressPublish()
   })
 
-  React.useEffect(() => {
+  useEffect(() => {
     if (publishOnUpload) {
       let erroredVideos = 0
       let uploadingVideos = 0
       for (let post of thread.posts) {
+        if (isEmptyPost(post)) continue
         if (post.embed.media?.type === 'video') {
           const video = post.embed.media.video
           if (video.status === 'error') {
@@ -1173,7 +1135,7 @@ export const ComposePost = ({
         setPublishOnUpload(false)
       } else if (uploadingVideos === 0) {
         setPublishOnUpload(false)
-        onPressPublish()
+        void onPressPublish()
       }
     }
   }, [thread.posts, onPressPublish, publishOnUpload])
@@ -1194,17 +1156,6 @@ export const ComposePost = ({
     }
   }
 
-  const onEmojiButtonPress = useCallback(() => {
-    const rect = textInput.current?.getCursorPosition()
-    if (rect) {
-      openEmojiPicker?.({
-        ...rect,
-        nextFocusRef:
-          textInput as unknown as React.MutableRefObject<HTMLElement>,
-      })
-    }
-  }, [openEmojiPicker])
-
   const scrollViewRef = useAnimatedRef<Animated.ScrollView>()
   useEffect(() => {
     if (composerState.mutableNeedsFocusActive) {
@@ -1212,13 +1163,10 @@ export const ComposePost = ({
       // On Android, this risks getting the cursor stuck behind the keyboard.
       // Not worth it.
       if (!IS_ANDROID) {
-        // Prevent autofocus if we are fake loading
-        if (!isFakeLoading) {
-           textInput.current?.focus()
-        }
+        textInputRef.current?.focus()
       }
     }
-  }, [composerState, isFakeLoading])
+  }, [composerState])
 
   const isLastThreadedPost = thread.posts.length > 1 && nextPost === undefined
   const {
@@ -1256,7 +1204,6 @@ export const ComposePost = ({
           !isEmptyPost(activePost) && (!nextPost || !isEmptyPost(nextPost))
         }
         onError={setError}
-        onEmojiButtonPress={onEmojiButtonPress}
         onSelectVideo={selectVideo}
         onAddPost={() => {
           composerDispatch({
@@ -1266,7 +1213,7 @@ export const ComposePost = ({
         currentLanguages={currentLanguages}
         onSelectLanguage={onSelectLanguage}
         openGallery={openGallery}
-        logTelemetry={logTelemetry} // <--- ADD THIS HERE
+        textInputRef={textInputRef}
       />
     </>
   )
@@ -1314,91 +1261,55 @@ export const ComposePost = ({
             />
           </ComposerTopBar>
 
-          {/* --- COMPOSER BODY --- */}
           <Animated.ScrollView
             ref={scrollViewRef}
             layout={native(LinearTransition)}
             onScroll={scrollHandler}
             contentContainerStyle={a.flex_grow}
-            style={a.flex_1}
-            // Block touches completely while fake loading
-            pointerEvents={isFakeLoading ? 'none' : 'auto'} 
+            style={[
+              a.flex_1,
+              web({
+                scrollbarGutter: 'stable',
+                scrollbarColor: `${t.palette.contrast_200} transparent`,
+              }),
+            ]}
             keyboardShouldPersistTaps="always"
             onContentSizeChange={onScrollViewContentSizeChange}
             onLayout={onScrollViewLayout}>
-
-            {/* POSITION 1: TOP (Always visible if active) */}
-            {renderIntervention('top')}
-
-            {/* The Original Post Context - Uses GENERAL fade */}
-            {replyTo ? (
-              <Animated.View style={generalFadeStyle} pointerEvents={isComposerRevealed ? 'auto' : 'none'}>
-                <ComposerReplyTo replyTo={replyTo} />
-              </Animated.View>
-            ) : null}
-
-            {/* POSITION 2: MIDDLE (Always visible if active) */}
-            {renderIntervention('middle')}
-
-            {/* The User's Text Input Box - Uses TEXT BOX fade */}
+            {replyTo ? <ComposerReplyTo replyTo={replyTo} /> : undefined}
             {thread.posts.map((post, index) => (
-              <React.Fragment key={post.id + (composerState.draftId ?? '')}>
-                <Animated.View style={textBoxFadeStyle} pointerEvents={isComposerRevealed ? 'auto' : 'none'}>
-                  <ComposerPost
-                    post={post}
-                    dispatch={composerDispatch}
-                    textInput={post.id === activePost.id ? textInput : null}
-                    isFirstPost={index === 0}
-                    isLastPost={index === thread.posts.length - 1}
-                    isPartOfThread={thread.posts.length > 1}
-                    isReply={index > 0 || !!replyTo}
-                    isActive={post.id === activePost.id}
-                    canRemovePost={thread.posts.length > 1}
-                    canRemoveQuote={index > 0 || !initQuote}
-                    onSelectVideo={selectVideo}
-                    onClearVideo={clearVideo}
-                    onPublish={onComposerPostPublish}
-                    onError={setError}
-                    logTelemetry={logTelemetry}
-                    // MODSKY PASSDOWNS:
-                    isFakeLoading={isFakeLoading}
-                    placeholderOverride={
-                      interventionState?.position === 'placeholder' 
-                        ? interventionState.text 
-                        : undefined
-                    }
-                    isInterventionActive={!!interventionState}
-                  />
-                </Animated.View>
-                
+              <Fragment key={post.id + (composerState.draftId ?? '')}>
+                <ComposerPost
+                  post={post}
+                  dispatch={composerDispatch}
+                  textInputRef={post.id === activePost.id ? textInputRef : null}
+                  isFirstPost={index === 0}
+                  isLastPost={index === thread.posts.length - 1}
+                  isPartOfThread={thread.posts.length > 1}
+                  isReply={index > 0 || !!replyTo}
+                  isActive={post.id === activePost.id}
+                  canRemovePost={thread.posts.length > 1}
+                  canRemoveQuote={index > 0 || !initQuote}
+                  onSelectVideo={selectVideo}
+                  onClearVideo={clearVideo}
+                  onPublish={onComposerPostPublish}
+                  onError={setError}
+                />
                 {IS_WEBFooterSticky && post.id === activePost.id && (
-                  <View style={styles.stickyFooterWeb}>
-                    <Animated.View style={generalFadeStyle} pointerEvents={isComposerRevealed ? 'auto' : 'none'}>
-                       {footer}
-                    </Animated.View>
-                  </View>
+                  <View style={styles.stickyFooterWeb}>{footer}</View>
                 )}
-              </React.Fragment>
+              </Fragment>
             ))}
-
-            {/* POSITION 4: BOTTOM (Always visible if active) */}
-            {renderIntervention('bottom')}
-
           </Animated.ScrollView>
-          
-          {!IS_WEBFooterSticky && (
-             <Animated.View style={generalFadeStyle} pointerEvents={isComposerRevealed ? 'auto' : 'none'}>
-                {footer}
-             </Animated.View>
-          )}
+          {!IS_WEBFooterSticky && footer}
         </View>
 
         {replyTo ? (
           <Prompt.Basic
             control={discardPromptControl}
-            title={_(msg`Discard draft?`)}
+            title={l`Discard draft?`}
             description=""
-            confirmButtonCta={_(msg`Discard`)}
+            confirmButtonCta={l`Discard`}
             confirmButtonColor="negative"
             onConfirm={handleDiscard}
           />
@@ -1436,33 +1347,106 @@ export const ComposePost = ({
             <Prompt.Actions>
               {allPostsWithinLimit && (
                 <Prompt.Action
-                  cta={
-                    composerState.draftId
-                      ? _(msg`Save changes`)
-                      : _(msg`Save draft`)
-                  }
+                  cta={composerState.draftId ? l`Save changes` : l`Save draft`}
                   onPress={handleSaveDraft}
                   color="primary"
                 />
               )}
               <Prompt.Action
-                cta={_(msg`Discard`)}
+                cta={l`Discard`}
                 onPress={handleDiscard}
                 color="negative_subtle"
               />
-              <Prompt.Cancel cta={_(msg`Keep editing`)} />
+              <Prompt.Cancel cta={l`Keep editing`} />
             </Prompt.Actions>
           </Prompt.Outer>
         )}
+
+        <Prompt.Basic
+          control={emptyPostsPromptControl}
+          title={l`Skip empty posts?`}
+          description={l`Your thread has empty posts that will be skipped. The remaining posts will be published as a thread.`}
+          confirmButtonCta={l`Post anyway`}
+          cancelButtonCta={l`Keep editing`}
+          onConfirm={handleConfirmSkipEmpty}
+        />
+        
+        {/* --- MODSKY INTERVENTION UI START --- */}
+        {interventionState?.isVisible && (
+          <View style={[
+            StyleSheet.absoluteFillObject, 
+            { zIndex: 9999, elevation: 9999, pointerEvents: 'box-none' },
+            interventionState.type === 'blanket' && { backgroundColor: 'rgba(0,0,0,0.4)' }
+          ]}>
+            <View style={{
+              position: 'absolute',
+              // 3x3 Grid Calculation
+              top: `${Math.floor(interventionState.position / 3) * 30 + 10}%`,
+              left: `${(interventionState.position % 3) * 30 + 5}%`,
+              width: '45%', // Made slightly wider to comfortably fit two buttons side-by-side
+              backgroundColor: interventionState.color,
+              padding: 15,
+              borderRadius: 12,
+              shadowColor: '#000',
+              shadowOffset: { width: 0, height: 4 },
+              shadowOpacity: 0.3,
+              shadowRadius: 5,
+              elevation: 6,
+            }}>
+              <Text style={{ fontSize: 16, marginBottom: 15, color: '#000' }}>
+                {interventionState.text}
+              </Text>
+              
+              {/* Button Row */}
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between', gap: 8 }}>
+                <Button
+                  label="Edit"
+                  size="small"
+                  color="secondary"
+                  style={{ flex: 1, alignItems: 'center' }}
+                  onPress={() => {
+                    // Just close the popup. Does NOT publish.
+                    setInterventionState(null); 
+                  }}>
+                  <ButtonText>Edit</ButtonText>
+                </Button>
+
+                <Button
+                  label="Publish"
+                  size="small"
+                  color="primary"
+                  style={{ flex: 1, alignItems: 'center' }}
+                  onPress={() => {
+                    // Close popup AND publish the post.
+                    setInterventionState(null); 
+                    onPressPublish(); 
+                  }}>
+                  <ButtonText>Publish</ButtonText>
+                </Button>
+              </View>
+
+            </View>
+          </View>
+        )}
+        {/* --- MODSKY INTERVENTION UI END --- */}
+
+        <Prompt.Basic
+          control={emptyPostsPromptControl}
+          title={l`Skip empty posts?`}
+          description={l`Your thread has empty posts that will be skipped. The remaining posts will be published as a thread.`}
+          confirmButtonCta={l`Post anyway`}
+          cancelButtonCta={l`Keep editing`}
+          onConfirm={handleConfirmSkipEmpty}
+        />
       </KeyboardAvoidingView>
     </BottomSheetPortalProvider>
   )
 }
 
-let ComposerPost = React.memo(function ComposerPost({
+let ComposerPost = memo(function ComposerPost({
   post,
   dispatch,
-  textInput,
+  textInputRef,
   isActive,
   isReply,
   isFirstPost,
@@ -1474,14 +1458,10 @@ let ComposerPost = React.memo(function ComposerPost({
   onSelectVideo,
   onError,
   onPublish,
-  logTelemetry, 
-  isFakeLoading,
-  placeholderOverride,
-  isInterventionActive,
 }: {
   post: PostDraft
   dispatch: (action: ComposerAction) => void
-  textInput: React.Ref<TextInputRef>
+  textInputRef: React.RefObject<TextInputRef | null> | null
   isActive: boolean
   isReply: boolean
   isFirstPost: boolean
@@ -1493,30 +1473,21 @@ let ComposerPost = React.memo(function ComposerPost({
   onSelectVideo: (postId: string, asset: ImagePickerAsset) => void
   onError: (error: string) => void
   onPublish: (richtext: RichText) => void
-  logTelemetry: (event: string, payload?: any) => void
-  isFakeLoading: boolean
-  placeholderOverride?: string
-  isInterventionActive: boolean
 }) {
   const {currentAccount} = useSession()
-  const t = useTheme()
   const currentDid = currentAccount!.did
-  const {_} = useLingui()
+  const {t: l} = useLingui()
   const {data: currentProfile} = useProfileQuery({did: currentDid})
   const richtext = post.richtext
   const isTextOnly = !post.embed.link && !post.embed.quote && !post.embed.media
   const forceMinHeight = IS_WEB && isTextOnly && isActive
-  
-  // Override the standard placeholder if the intervention is set to 'placeholder'
-  const selectTextInputPlaceholder = placeholderOverride 
-    ? placeholderOverride 
-    : isReply
-      ? isFirstPost
-        ? _(msg`Write your reply`)
-        : _(msg`Add another post`)
-      : _(msg`What's up?`)
+  const selectTextInputPlaceholder = isReply
+    ? isFirstPost
+      ? l`Write your reply`
+      : l`Add another post`
+    : l`What's up?`
   const discardPromptControl = Prompt.usePromptControl()
-  
+
   const dispatchPost = useCallback(
     (action: PostAction) => {
       dispatch({
@@ -1530,29 +1501,12 @@ let ComposerPost = React.memo(function ComposerPost({
 
   const onImageAdd = useCallback(
     (next: ComposerImage[]) => {
-      console.log("RAW IMAGE DATA:", next);
-
-      const imageMetadata = next.map(img => {
-        const source = img.source || {}; 
-        return {
-          width: source.width,
-          height: source.height,
-          mimeType: source.mime || source.mimeType, 
-        };
-      });
-
-      logTelemetry('MEDIA_ADDED', { 
-        type: 'image_selected', 
-        count: next.length,
-        metadata: imageMetadata
-      });
-      
       dispatchPost({
         type: 'embed_add_images',
         images: next,
       })
     },
-    [dispatchPost, logTelemetry], 
+    [dispatchPost],
   )
 
   const onNewLink = useCallback(
@@ -1571,7 +1525,7 @@ let ComposerPost = React.memo(function ComposerPost({
         if (IS_NATIVE) return // web only
         const [mimeType] = uri.slice('data:'.length).split(';')
         if (!SUPPORTED_MIME_TYPES.includes(mimeType as SupportedMimeTypes)) {
-          Toast.show(_(msg`Unsupported video type: ${mimeType}`), {
+          Toast.show(l`Unsupported video type: ${mimeType}`, {
             type: 'error',
           })
           return
@@ -1586,7 +1540,7 @@ let ComposerPost = React.memo(function ComposerPost({
         onImageAdd([res])
       }
     },
-    [post.id, onSelectVideo, onImageAdd, _],
+    [post.id, onSelectVideo, onImageAdd, l],
   )
 
   useHideKeyboardOnBackground()
@@ -1607,49 +1561,44 @@ let ComposerPost = React.memo(function ComposerPost({
           type={currentProfile?.associated?.labeler ? 'labeler' : 'user'}
           style={[a.mt_xs]}
         />
-        
-        {/* We use the REAL input, but trap it with pointerEvents="none" during the fake load.
-            We leave editable=true so the native OS doesn't gray it out! */}
-        <View style={[a.flex_1, a.relative]} pointerEvents={isFakeLoading ? 'none' : 'auto'}>
-          <TextInput
-            ref={textInput}
-            editable={true} // Kept true so the placeholder styling stays exactly native
-            caretHidden={isFakeLoading} // Keeps the cursor completely hidden
-            style={[a.pt_xs]}
-            richtext={richtext}
-            placeholder={selectTextInputPlaceholder}
-            autoFocus={isLastPost && !isInterventionActive}
-            webForceMinHeight={forceMinHeight}
-            hasRightPadding={isPartOfThread}
-            isActive={isActive}
-            setRichText={rt => {
-              dispatchPost({type: 'update_richtext', richtext: rt})
-            }}
-            onFocus={() => {
-              dispatch({
-                type: 'focus_post',
-                postId: post.id,
-              })
-            }}
-            onPhotoPasted={onPhotoPasted}
-            onNewLink={onNewLink}
-            onError={onError}
-            onPressPublish={onPublish}
-            accessible={true}
-            accessibilityLabel={_(msg`Write post`)}
-            accessibilityHint={_(
-              msg`Compose posts up to ${plural(MAX_GRAPHEME_LENGTH || 0, {
-                other: '# characters',
-              })} in length`,
-            )}
-          />
-        </View>
+        <TextInput
+          ref={textInputRef}
+          style={[a.pt_xs]}
+          richtext={richtext}
+          placeholder={selectTextInputPlaceholder}
+          autoFocus={isLastPost}
+          webForceMinHeight={forceMinHeight}
+          // To avoid overlap with the close button:
+          hasRightPadding={isPartOfThread}
+          isActive={isActive}
+          setRichText={rt => {
+            dispatchPost({type: 'update_richtext', richtext: rt})
+          }}
+          onFocus={() => {
+            dispatch({
+              type: 'focus_post',
+              postId: post.id,
+            })
+          }}
+          onPhotoPasted={onPhotoPasted}
+          onNewLink={onNewLink}
+          onError={onError}
+          onPressPublish={onPublish}
+          accessible={true}
+          accessibilityLabel={l`Write post`}
+          accessibilityHint={l`Compose posts up to ${plural(
+            MAX_GRAPHEME_LENGTH || 0,
+            {
+              other: '# characters',
+            },
+          )} in length`}
+        />
       </View>
 
       {canRemovePost && isActive && (
         <>
           <Button
-            label={_(msg`Delete post`)}
+            label={l`Delete post`}
             size="small"
             color="secondary"
             variant="ghost"
@@ -1674,15 +1623,15 @@ let ComposerPost = React.memo(function ComposerPost({
           </Button>
           <Prompt.Basic
             control={discardPromptControl}
-            title={_(msg`Discard post?`)}
-            description={_(msg`Are you sure you'd like to discard this post?`)}
+            title={l`Discard post?`}
+            description={l`Are you sure you'd like to discard this post?`}
             onConfirm={() => {
               dispatch({
                 type: 'remove_post',
                 postId: post.id,
               })
             }}
-            confirmButtonCta={_(msg`Discard`)}
+            confirmButtonCta={l`Discard`}
             confirmButtonColor="negative"
           />
         </>
@@ -1739,7 +1688,8 @@ function ComposerTopBar({
   children?: React.ReactNode
 }) {
   const t = useTheme()
-  const {_} = useLingui()
+  const {t: l} = useLingui()
+
   return (
     <Animated.View
       style={topBarAnimatedStyle}
@@ -1752,7 +1702,7 @@ function ComposerTopBar({
           IS_LIQUID_GLASS ? [a.px_lg, a.pt_lg, a.pb_md] : [a.p_sm],
         ]}>
         <Button
-          label={_(msg`Cancel`)}
+          label={l`Cancel`}
           variant="ghost"
           color="primary"
           shape="default"
@@ -1760,10 +1710,8 @@ function ComposerTopBar({
           style={[{paddingLeft: 7, paddingRight: 7}]}
           hoverStyle={[a.bg_transparent, {opacity: 0.5}]}
           onPress={onCancel}
-          accessibilityHint={_(
-            msg`Closes post composer and discards post draft`,
-          )}>
-          <ButtonText style={[a.text_md]}>
+          accessibilityHint={l`Closes post composer and discards post draft`}>
+          <ButtonText style={[a.text_md]} maxFontSizeMultiplier={2}>
             <Trans>Cancel</Trans>
           </ButtonText>
         </Button>
@@ -1796,41 +1744,33 @@ function ComposerTopBar({
               label={
                 isReply
                   ? isThread
-                    ? _(
-                        msg({
-                          message: 'Publish replies',
-                          comment:
-                            'Accessibility label for button to publish multiple replies in a thread',
-                        }),
-                      )
-                    : _(
-                        msg({
-                          message: 'Publish reply',
-                          comment:
-                            'Accessibility label for button to publish a single reply',
-                        }),
-                      )
+                    ? l({
+                        message: 'Publish replies',
+                        comment:
+                          'Accessibility label for button to publish multiple replies in a thread',
+                      })
+                    : l({
+                        message: 'Publish reply',
+                        comment:
+                          'Accessibility label for button to publish a single reply',
+                      })
                   : isThread
-                    ? _(
-                        msg({
-                          message: 'Publish posts',
-                          comment:
-                            'Accessibility label for button to publish multiple posts in a thread',
-                        }),
-                      )
-                    : _(
-                        msg({
-                          message: 'Publish post',
-                          comment:
-                            'Accessibility label for button to publish a single post',
-                        }),
-                      )
+                    ? l({
+                        message: 'Publish posts',
+                        comment:
+                          'Accessibility label for button to publish multiple posts in a thread',
+                      })
+                    : l({
+                        message: 'Publish post',
+                        comment:
+                          'Accessibility label for button to publish a single post',
+                      })
               }
               color="primary"
               size="small"
               onPress={onPublish}
               disabled={!canPost || isPublishQueued}>
-              <ButtonText style={[a.text_md]}>
+              <ButtonText style={[a.text_md]} maxFontSizeMultiplier={2}>
                 {isReply ? (
                   <Trans context="action">Reply</Trans>
                 ) : isThread ? (
@@ -2040,29 +1980,27 @@ function ComposerFooter({
   post,
   dispatch,
   showAddButton,
-  onEmojiButtonPress,
   onSelectVideo,
   onAddPost,
   currentLanguages,
   onSelectLanguage,
   openGallery,
-  logTelemetry, // <--- Add to destructured props
+  textInputRef,
 }: {
   post: PostDraft
   dispatch: (action: PostAction) => void
   showAddButton: boolean
-  onEmojiButtonPress: () => void
   onError: (error: string) => void
   onSelectVideo: (postId: string, asset: ImagePickerAsset) => void
   onAddPost: () => void
   currentLanguages: string[]
   onSelectLanguage?: (language: string) => void
   openGallery?: boolean
-  logTelemetry: (event: string, payload?: any) => void // <--- Add to type definitions
+  textInputRef: React.RefObject<TextInputRef | null>
 }) {
   const t = useTheme()
-  const {_} = useLingui()
-  const {isMobile} = useWebMediaQueries()
+  const {t: l} = useLingui()
+  const {gtPhone} = useBreakpoints()
   /*
    * Once we've allowed a certain type of asset to be selected, we don't allow
    * other types of media to be selected.
@@ -2092,42 +2030,19 @@ function ComposerFooter({
 
   const onImageAdd = useCallback(
     (next: ComposerImage[]) => {
-      console.log("RAW IMAGE DATA:", next);
-      // --- ADD TELEMETRY HERE TOO ---
-      const imageMetadata = next.map(img => {
-        const source = img.source || {}; // Look inside the 'source' object!
-        return {
-          width: source.width,
-          height: source.height,
-          mimeType: source.mime || source.mimeType, // Catches it depending on how the AT Protocol formatted it
-        };
-      });
-
-      logTelemetry('MEDIA_ADDED', { 
-        type: 'image_selected', // (or 'image_pasted' in ComposerPost)
-        count: next.length,
-        metadata: imageMetadata
-      });
-
       dispatch({
         type: 'embed_add_images',
         images: next,
       })
     },
-    [dispatch, logTelemetry],
+    [dispatch],
   )
 
   const onSelectGif = useCallback(
     (gif: Gif) => {
-      // --- UPDATED TELEMETRY ---
-      logTelemetry('MEDIA_ADDED', { 
-        type: 'gif',
-        url: gif.url, // This tells you exactly which GIF they chose!
-      }); 
-      
       dispatch({type: 'embed_add_gif', gif})
     },
-    [dispatch, logTelemetry],
+    [dispatch],
   )
 
   /*
@@ -2208,17 +2123,23 @@ function ComposerFooter({
                 onAdd={onImageAdd}
               />
               <SelectGifBtn onSelectGif={onSelectGif} disabled={!!media} />
-              {!isMobile ? (
-                <Button
-                  onPress={onEmojiButtonPress}
-                  style={a.p_sm}
-                  label={_(msg`Open emoji picker`)}
-                  accessibilityHint={_(msg`Opens emoji picker`)}
-                  variant="ghost"
-                  shape="round"
-                  color="primary">
-                  <EmojiSmileIcon size="lg" />
-                </Button>
+              {IS_WEB && gtPhone ? (
+                <EmojiPicker.Root nextFocusRef={textInputRef}>
+                  <EmojiPicker.Trigger label={l`Open emoji picker`}>
+                    {({props}) => (
+                      <Button
+                        style={a.p_sm}
+                        label={props.accessibilityLabel}
+                        variant="ghost"
+                        shape="round"
+                        color="primary"
+                        {...props}>
+                        <EmojiSmileIcon size="lg" />
+                      </Button>
+                    )}
+                  </EmojiPicker.Trigger>
+                  <EmojiPicker.Picker />
+                </EmojiPicker.Root>
               ) : null}
             </ToolbarWrapper>
           )}
@@ -2227,7 +2148,7 @@ function ComposerFooter({
       <View style={[a.flex_row, a.align_center, a.justify_between]}>
         {showAddButton && (
           <Button
-            label={_(msg`Add another post to thread`)}
+            label={l`Add another post to thread`}
             onPress={onAddPost}
             style={[a.p_sm]}
             variant="ghost"
@@ -2509,7 +2430,7 @@ function ErrorBanner({
   clearVideo: () => void
 }) {
   const t = useTheme()
-  const {_} = useLingui()
+  const {t: l} = useLingui()
 
   const videoError =
     videoState.status === 'error' ? videoState.error : undefined
@@ -2544,7 +2465,7 @@ function ErrorBanner({
             {error}
           </Text>
           <Button
-            label={_(msg`Dismiss error`)}
+            label={l`Dismiss error`}
             size="tiny"
             color="secondary"
             variant="ghost"
@@ -2591,7 +2512,7 @@ function ToolbarWrapper({
 
 function VideoUploadToolbar({state}: {state: VideoState}) {
   const t = useTheme()
-  const {_} = useLingui()
+  const {t: l} = useLingui()
   const progress = state.progress
   const shouldRotate =
     state.status === 'processing' && (progress === 0 || progress === 1)
@@ -2623,34 +2544,34 @@ function VideoUploadToolbar({state}: {state: VideoState}) {
   switch (state.status) {
     case 'compressing':
       if (isGif) {
-        text = _(msg`Compressing GIF...`)
+        text = l`Compressing GIF...`
       } else {
-        text = _(msg`Compressing video...`)
+        text = l`Compressing video...`
       }
       break
     case 'uploading':
       if (isGif) {
-        text = _(msg`Uploading GIF...`)
+        text = l`Uploading GIF...`
       } else {
-        text = _(msg`Uploading video...`)
+        text = l`Uploading video...`
       }
       break
     case 'processing':
       if (isGif) {
-        text = _(msg`Processing GIF...`)
+        text = l`Processing GIF...`
       } else {
-        text = _(msg`Processing video...`)
+        text = l`Processing video...`
       }
       break
     case 'error':
-      text = _(msg`Error`)
+      text = l`Error`
       wheelProgress = 100
       break
     case 'done':
       if (isGif) {
-        text = _(msg`GIF uploaded`)
+        text = l`GIF uploaded`
       } else {
-        text = _(msg`Video uploaded`)
+        text = l`Video uploaded`
       }
       break
   }

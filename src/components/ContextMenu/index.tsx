@@ -1,4 +1,7 @@
-import React, {
+import {
+  cloneElement,
+  Fragment,
+  isValidElement,
   useCallback,
   useEffect,
   useId,
@@ -51,7 +54,7 @@ import {HITSLOP_10} from '#/lib/constants'
 import {useHaptics} from '#/lib/haptics'
 import {useNonReactiveCallback} from '#/lib/hooks/useNonReactiveCallback'
 import {logger} from '#/logger'
-import {atoms as a, platform, tokens, useTheme} from '#/alf'
+import {atoms as a, flatten, platform, tokens, useTheme} from '#/alf'
 import {
   Context,
   ItemContext,
@@ -232,7 +235,13 @@ export function Root({children}: {children: React.ReactNode}) {
   return <Context.Provider value={context}>{children}</Context.Provider>
 }
 
-export function Trigger({children, label, contentLabel, style}: TriggerProps) {
+export function Trigger({
+  children,
+  label,
+  contentLabel,
+  style,
+  onTap,
+}: TriggerProps) {
   const context = useContextMenuContext()
   const playHaptic = useHaptics()
   const insets = useSafeAreaInsets()
@@ -291,6 +300,17 @@ export function Trigger({children, label, contentLabel, style}: TriggerProps) {
     }
   }, [context, insets])
 
+  const tapGesture = useMemo(() => {
+    const gesture = Gesture.Tap()
+      .numberOfTaps(1)
+      .cancelsTouchesInView(false)
+      .runOnJS(true)
+    if (onTap) {
+      gesture.onEnd(() => void onTap())
+    }
+    return gesture
+  }, [onTap])
+
   const doubleTapGesture = useMemo(() => {
     return Gesture.Tap()
       .numberOfTaps(2)
@@ -343,8 +363,10 @@ export function Trigger({children, label, contentLabel, style}: TriggerProps) {
       })
   }, [open, hoverablesSV, onTouchUpMenuItem, hoveredItemSV, translationSV])
 
+  // Order matters here: doubleTapGesture must come before tapGesture.
   const composedGestures = Gesture.Exclusive(
     doubleTapGesture,
+    tapGesture,
     pressAndHoldGesture,
   )
 
@@ -479,7 +501,11 @@ function TriggerClone({
   )
 }
 
-export function AuxiliaryView({children, align = 'left'}: AuxiliaryViewProps) {
+export function AuxiliaryView({
+  children,
+  align = 'left',
+  style,
+}: AuxiliaryViewProps) {
   const context = useContextMenuContext()
   const {width: screenWidth} = useWindowDimensions()
   const {top: topInset} = useSafeAreaInsets()
@@ -501,7 +527,8 @@ export function AuxiliaryView({children, align = 'left'}: AuxiliaryViewProps) {
     }
   })
 
-  const menuContext = useMemo(() => ({align}), [align])
+  const xOffset = (flatten(style)?.marginLeft as number) ?? 0
+  const menuContext = useMemo(() => ({align, xOffset}), [align, xOffset])
 
   const onLayout = useCallback(() => {
     if (!measurement) return
@@ -553,6 +580,7 @@ export function AuxiliaryView({children, align = 'left'}: AuxiliaryViewProps) {
                 : {right: screenWidth - measurement.x - measurement.width},
               animatedStyle,
               a.z_20,
+              style,
             ]}>
             {children}
           </Animated.View>
@@ -628,7 +656,8 @@ export function Outer({
     [context.measurement, frame.height, insets, translationSV],
   )
 
-  const menuContext = useMemo(() => ({align}), [align])
+  const xOffset = (flatten(style)?.marginLeft as number) ?? 0
+  const menuContext = useMemo(() => ({align, xOffset}), [align, xOffset])
 
   if (!context.isOpen || !context.measurement) return null
 
@@ -689,22 +718,22 @@ export function Outer({
                     t.atoms.border_contrast_low,
                   ]}>
                   {flattenReactChildren(children).map((child, i) => {
-                    return React.isValidElement(child) &&
+                    return isValidElement(child) &&
                       (child.type === Item || child.type === Divider) ? (
-                      <React.Fragment key={i}>
+                      <Fragment key={i}>
                         {i > 0 ? (
                           <View
                             style={[a.border_b, t.atoms.border_contrast_low]}
                           />
                         ) : null}
-                        {React.cloneElement(child, {
+                        {cloneElement(child, {
                           // @ts-expect-error not typed
                           style: {
                             borderRadius: 0,
                             borderWidth: 0,
                           },
                         })}
-                      </React.Fragment>
+                      </Fragment>
                     ) : null
                   })}
                 </View>
@@ -736,7 +765,7 @@ export function Item({
     onOut: onPressOut,
   } = useInteractionState()
   const id = useId()
-  const {align} = useContextMenuMenuContext()
+  const {align, xOffset: menuXOffset} = useContextMenuMenuContext()
 
   const {close, measurement, registerHoverable} = context
 
@@ -752,8 +781,8 @@ export function Item({
       const xOffset = position
         ? position.x
         : align === 'left'
-          ? measurement.x
-          : measurement.x + measurement.width - layout.width
+          ? measurement.x + menuXOffset
+          : measurement.x + measurement.width - layout.width - menuXOffset
 
       registerHoverable(
         id,
@@ -769,7 +798,16 @@ export function Item({
         },
       )
     },
-    [id, measurement, registerHoverable, close, onPress, align, position],
+    [
+      id,
+      measurement,
+      registerHoverable,
+      close,
+      onPress,
+      align,
+      menuXOffset,
+      position,
+    ],
   )
 
   const itemContext = useMemo(

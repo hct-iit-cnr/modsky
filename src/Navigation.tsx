@@ -78,6 +78,7 @@ import HashtagScreen from '#/screens/Hashtag'
 import {LogScreen} from '#/screens/Log'
 import {MessagesScreen} from '#/screens/Messages/ChatList'
 import {MessagesConversationScreen} from '#/screens/Messages/Conversation'
+import {MessagesConversationSettingsScreen} from '#/screens/Messages/ConversationSettings'
 import {MessagesInboxScreen} from '#/screens/Messages/Inbox'
 import {MessagesSettingsScreen} from '#/screens/Messages/Settings'
 import {ModerationScreen} from '#/screens/Moderation'
@@ -103,6 +104,7 @@ import {ActivityPrivacySettingsScreen} from '#/screens/Settings/ActivityPrivacyS
 import {AppearanceSettingsScreen} from '#/screens/Settings/AppearanceSettings'
 import {AppIconSettingsScreen} from '#/screens/Settings/AppIconSettings'
 import {AppPasswordsScreen} from '#/screens/Settings/AppPasswords'
+import {AutomationLabelSettingsScreen} from '#/screens/Settings/AutomationLabelSettings'
 import {ContentAndMediaSettingsScreen} from '#/screens/Settings/ContentAndMediaSettings'
 import {ExternalMediaPreferencesScreen} from '#/screens/Settings/ExternalMediaPreferences'
 import {FindContactsSettingsScreen} from '#/screens/Settings/FindContactsSettings'
@@ -404,6 +406,14 @@ function commonScreens(Stack: typeof Flat, unreadCountLabel?: string) {
         }}
       />
       <Stack.Screen
+        name="AutomationLabelSettings"
+        getComponent={() => AutomationLabelSettingsScreen}
+        options={{
+          title: title(msg`Automation Label`),
+          requireAuth: true,
+        }}
+      />
+      <Stack.Screen
         name="PrivacyAndSecuritySettings"
         getComponent={() => PrivacyAndSecuritySettingsScreen}
         options={{
@@ -558,6 +568,11 @@ function commonScreens(Stack: typeof Flat, unreadCountLabel?: string) {
         name="MessagesConversation"
         getComponent={() => MessagesConversationScreen}
         options={{title: title(msg`Chat`), requireAuth: true}}
+      />
+      <Stack.Screen
+        name="MessagesConversationSettings"
+        getComponent={() => MessagesConversationSettingsScreen}
+        options={{title: title(msg`Group chat settings`), requireAuth: true}}
       />
       <Stack.Screen
         name="MessagesSettings"
