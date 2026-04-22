@@ -35,6 +35,13 @@ module.exports = function (_config) {
 
   const USE_SENTRY = Boolean(process.env.SENTRY_AUTH_TOKEN)
 
+  const IOS_ICON_FILE =
+    PLATFORM === 'web' // web build doesn't like .icon files
+      ? './assets/app-icons/ios_icon_default_next.png'
+      : IS_TESTFLIGHT
+        ? './assets/app-icons/ios_icon_testflight.icon'
+        : './assets/app-icons/ios_icon_default.icon'
+
   return {
     expo: {
       version: VERSION,
@@ -47,7 +54,7 @@ module.exports = function (_config) {
       },
       icon: './assets/app-icons/ios_icon_default_next.png',
       userInterfaceStyle: 'automatic',
-      primaryColor: '#1083fe',
+      primaryColor: '#006AFF',
       newArchEnabled: false,
       ios: {
         supportsTablet: false,
@@ -55,11 +62,9 @@ module.exports = function (_config) {
         config: {
           usesNonExemptEncryption: false,
         },
-        icon:
-          PLATFORM === 'web' // web build doesn't like .icon files
-            ? './assets/app-icons/ios_icon_default_next.png'
-            : './assets/app-icons/ios_icon_default.icon',
+        icon: IOS_ICON_FILE,
         infoPlist: {
+          CADisableMinimumFrameDurationOnPhone: true,
           UIBackgroundModes: ['remote-notification'],
           NSCameraUsageDescription:
             'Used for profile pictures, posts, and other kinds of content.',
@@ -264,7 +269,7 @@ module.exports = function (_config) {
               ],
             },
             android: {
-              compileSdkVersion: 35,
+              compileSdkVersion: 36,
               targetSdkVersion: 35,
               buildToolsVersion: '35.0.0',
               buildReactNativeFromSource: IS_PRODUCTION,
@@ -292,7 +297,6 @@ module.exports = function (_config) {
         './plugins/withAndroidManifestFCMIconPlugin.js',
         './plugins/withAndroidManifestIntentQueriesPlugin.js',
         './plugins/withAndroidStylesAccentColorPlugin.js',
-        './plugins/withAndroidDayNightThemePlugin.js',
         './plugins/withAndroidNoJitpackPlugin.js',
         './plugins/shareExtension/withShareExtensions.js',
         './plugins/notificationsExtension/withNotificationsExtension.js',

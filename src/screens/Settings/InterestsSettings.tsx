@@ -19,16 +19,18 @@ import {
 } from '#/state/queries/preferences'
 import {type UsePreferencesQueryResponse} from '#/state/queries/preferences/types'
 import {createGetSuggestedFeedsQueryKey} from '#/state/queries/trending/useGetSuggestedFeedsQuery'
-import {createGetSuggestedUsersQueryKey} from '#/state/queries/trending/useGetSuggestedUsersQuery'
+import {createGetSuggestedUsersForDiscoverQueryKey} from '#/state/queries/trending/useGetSuggestedUsersForDiscoverQuery'
+import {createGetSuggestedUsersForExploreQueryKey} from '#/state/queries/trending/useGetSuggestedUsersForExploreQuery'
+import {createGetSuggestedUsersForSeeMoreQueryKey} from '#/state/queries/trending/useGetSuggestedUsersForSeeMoreQuery'
 import {createSuggestedStarterPacksQueryKey} from '#/state/queries/useSuggestedStarterPacksQuery'
 import {useAgent} from '#/state/session'
-import * as Toast from '#/view/com/util/Toast'
 import {atoms as a, useGutters, useTheme} from '#/alf'
 import {Admonition} from '#/components/Admonition'
 import {Divider} from '#/components/Divider'
 import * as Toggle from '#/components/forms/Toggle'
 import * as Layout from '#/components/Layout'
 import {Loader} from '#/components/Loader'
+import * as Toast from '#/components/Toast'
 import {Text} from '#/components/Typography'
 
 type Props = NativeStackScreenProps<CommonNavigatorParams, 'InterestsSettings'>
@@ -120,7 +122,15 @@ function Inner({
         await Promise.all([
           qc.resetQueries({queryKey: createSuggestedStarterPacksQueryKey()}),
           qc.resetQueries({queryKey: createGetSuggestedFeedsQueryKey()}),
-          qc.resetQueries({queryKey: createGetSuggestedUsersQueryKey({})}),
+          qc.resetQueries({
+            queryKey: createGetSuggestedUsersForDiscoverQueryKey({}),
+          }),
+          qc.resetQueries({
+            queryKey: createGetSuggestedUsersForExploreQueryKey({}),
+          }),
+          qc.resetQueries({
+            queryKey: createGetSuggestedUsersForSeeMoreQueryKey({}),
+          }),
         ])
 
         Toast.show(
@@ -139,7 +149,9 @@ function Inner({
               context: 'toast',
             }),
           ),
-          'xmark',
+          {
+            type: 'error',
+          },
         )
       } finally {
         setIsSaving(false)
