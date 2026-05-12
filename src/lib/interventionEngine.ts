@@ -1,79 +1,94 @@
 // src/lib/interventionEngine.ts
 
-export type InterventionPosition = 'top' | 'middle' | 'placeholder' | 'bottom';
+export type InterventionPosition = 'title' | 'top' | 'middle' | 'placeholder' | 'bottom' | 'none';
 
 export type InterventionConfig = {
   isVisible: boolean;
-  type: 'blanket' | 'adapted';
   text: string;
   position: InterventionPosition;
   hasIcon: boolean;
   loadingType: 'none' | 'placeholder' | 'circle' | 'lines';
   loadingDuration: number;
+  readingDuration: number; // Added to dictate how long the text is read before revealing composer
+  testId?: number; // Added to log which specific test was chosen
 };
 
 // ==========================================
 // --- MRT CONFIGURATION VARIABLES ---
 // ==========================================
 
-// Probability the intervention appears at all. 
-// 1.0 = 100% chance (Always show for testing)
-// 0.66 = ~66% chance (Standard MRT: 1/3 Control, 2/3 Intervention)
 const CHANCE_TO_SHOW_INTERVENTION = 1.0; 
-
-// If showing an intervention, probability it is the "Blanket" type.
-// 0.5 = 50% Blanket / 50% Adapted.
-const CHANCE_FOR_BLANKET_TYPE = 0.5;
-
-// Fake loading duration bounds (in milliseconds)
-const MIN_LOADING_MS = 2000; // 2 seconds
-const MAX_LOADING_MS = 3000; // 3 seconds
+const INITIAL_DELAY_MS = 300; // Box appears -> Intervention appears
+const MIN_READING_MS = 1200;   // Intervention appears -> Rest appearing (Min)
+const MAX_READING_MS = 1500;   // Intervention appears -> Rest appearing (Max)
 
 // ==========================================
 
-const OFFICIAL_RANKING = [
-  "Remember, there are real people on the other side of the screen.",
-  "Let's remember to talk to the people behind the screen, not just the screen itself.",
-  "Consider how your words might look to someone scrolling past this on their timeline.",
-  "Before you hit send, remember the human beings behind the screen.",
-  "It can be easy to forget, but your words will reach real humans on the other side.",
-  "Your words are about to reach real people, just like you. Please keep that in mind.",
-  "Pause and remember: there are human beings on the receiving end of this post.",
-  "Remember that every screen displaying your post has a real person behind it.",
-  "Take a second to imagine how your message will land with the people reading it.",
-  "Take a brief pause: how would you react if you were the one reading this?",
-  "Stop for a second and try to see this post from the perspective of whoever comes across it.",
-  "Pause and imagine reading this for the first time from the other side of the screen."
-];
+// The fixed matrix binding IDs to explicit text, positions, and reply states.
+export const TEST_INTERVENTIONS = [
+  { id: 0, position: 'bottom', loadingType: 'placeholder', isReply: true, isNonReply: true, text: 'Remember, there are real people on the other side of the screen.', label: 'Bottom, Skeleton' },
+  { id: 1, position: 'title', loadingType: 'placeholder', isReply: true, isNonReply: true, text: 'Real people are on the other side of the screen.', label: 'Title, Skeleton' },
+  { id: 2, position: 'title', loadingType: 'circle', isReply: true, isNonReply: true, text: 'You are talking to real people, not just a screen.', label: 'Title, Spinner' },
+  { id: 3, position: 'title', loadingType: 'lines', isReply: true, isNonReply: true, text: 'Your post will reach real humans.', label: 'Title, Dots' },
+  { id: 4, position: 'top', loadingType: 'placeholder', isReply: true, isNonReply: true, text: 'It can be easy to forget, but your words will reach real humans on the other side of the screen.', label: 'Top, Skeleton' },
+  { id: 5, position: 'top', loadingType: 'circle', isReply: true, isNonReply: true, text: 'Before you hit send, remember the human beings behind the screen.', label: 'Top, Spinner' },
+  { id: 6, position: 'top', loadingType: 'lines', isReply: true, isNonReply: true, text: 'Your words are about to reach real people, just like you. Please keep that in mind.', label: 'Top, Dots' },
+  { id: 7, position: 'middle', loadingType: 'placeholder', isReply: true, isNonReply: false, text: 'Take a second to imagine how your message will land with @user reading it.', label: 'Middle, Skeleton' },
+  { id: 8, position: 'placeholder', loadingType: 'placeholder', isReply: true, isNonReply: false, text: "Let's remember to talk to @user behind the screen, not just the screen itself.", label: 'Placeholder, Skeleton' },
+  { id: 9, position: 'placeholder', loadingType: 'circle', isReply: true, isNonReply: false, text: 'Before you hit send, remember the human being @user behind the screen.', label: 'Placeholder, Spinner' },
+  { id: 10, position: 'placeholder', loadingType: 'lines', isReply: true, isNonReply: false, text: 'Your words will reach @user, a real person  just like you. Please keep that in mind.', label: 'Placeholder, Dots' },
+  { id: 11, position: 'bottom', loadingType: 'placeholder', isReply: true, isNonReply: true, text: 'Pause and remember: there are human beings on the receiving end of what you post.', label: 'Bottom, Skeleton' },
+  { id: 12, position: 'bottom', loadingType: 'circle', isReply: true, isNonReply: true, text: 'Remember that every screen displaying your posts has a real person behind it.', label: 'Bottom, Spinner' },
+  { id: 13, position: 'bottom', loadingType: 'lines', isReply: true, isNonReply: true, text: 'Take a second to imagine how your message will land with the people reading it.', label: 'Bottom, Dots' }
+] as const;
 
-const POSITIONS: InterventionPosition[] = ['top', 'middle', 'placeholder', 'bottom'];
-const LOADING_TYPES: InterventionConfig['loadingType'][] = ['placeholder', 'circle', 'lines'];
+export const getInterventionConfig = (
+  isReply: boolean,
+  replyToName?: string,
+  forceId?: number
+): InterventionConfig => {
 
-export const getInterventionConfig = (): InterventionConfig => {
-  // 1. Check if the user falls into the Control group (no intervention)
-  if (Math.random() > CHANCE_TO_SHOW_INTERVENTION) {
-    return { isVisible: false } as InterventionConfig;
+  let selectedConfig;
+
+  // 1. If forced ID is provided from debug menu
+  if (forceId !== undefined) {
+    if (forceId === -1) return { isVisible: false } as InterventionConfig; 
+    selectedConfig = TEST_INTERVENTIONS.find(t => t.id === forceId);
+  } else {
+    // 2. Standard Randomization Flow
+    if (Math.random() > CHANCE_TO_SHOW_INTERVENTION) {
+      return { isVisible: false } as InterventionConfig; 
+    }
+
+    const validInterventions = TEST_INTERVENTIONS.filter(t => isReply ? t.isReply : t.isNonReply);
+    selectedConfig = validInterventions[Math.floor(Math.random() * validInterventions.length)];
   }
 
-  // 2. Determine Blanket vs Adapted
-  const isBlanket = Math.random() < CHANCE_FOR_BLANKET_TYPE;
-  const text = isBlanket 
-    ? OFFICIAL_RANKING[0] 
-    : OFFICIAL_RANKING[Math.floor(Math.random() * (OFFICIAL_RANKING.length - 1)) + 1];
+  if (!selectedConfig) {
+    return { isVisible: false } as InterventionConfig; 
+  }
 
-  // 3. Calculate random duration between MIN and MAX
-  const loadingDuration = Math.floor(
-    Math.random() * (MAX_LOADING_MS - MIN_LOADING_MS + 1) + MIN_LOADING_MS
+  // 3. Parse and Inject the display name dynamically (NO '@' symbol)
+  let formattedText = selectedConfig.text;
+  if (formattedText.includes('@user')) {
+    // Replace '@user' with the actual display name, or 'that person' if it fails to fetch
+    const nameToDisplay = replyToName ? replyToName : 'that person';
+    formattedText = formattedText.replace('@user', nameToDisplay);
+  }
+
+  // 4. Calculate randomized reading duration phase
+  const readingDuration = Math.floor(
+    Math.random() * (MAX_READING_MS - MIN_READING_MS + 1) + MIN_READING_MS
   );
 
-  // 4. Return the fully constructed config
   return {
     isVisible: true,
-    type: isBlanket ? 'blanket' : 'adapted',
-    text: text,
-    position: POSITIONS[Math.floor(Math.random() * POSITIONS.length)],
-    hasIcon: Math.random() > 0.5,
-    loadingType: LOADING_TYPES[Math.floor(Math.random() * LOADING_TYPES.length)],
-    loadingDuration: loadingDuration,
+    text: formattedText,
+    position: selectedConfig.position as InterventionPosition,
+    hasIcon: true,
+    loadingType: selectedConfig.loadingType as any,
+    loadingDuration: INITIAL_DELAY_MS, // Static 300ms
+    readingDuration: readingDuration, // <--- FIXED: Now strictly uses the 5000ms calc even for forced IDs
+    testId: selectedConfig.id,
   };
 };
